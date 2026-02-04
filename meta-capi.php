@@ -46,7 +46,10 @@ $event = [
   'custom_data' => $payload['custom_data'] ?? null,
 ];
 
-$body = json_encode(['data' => [$event]]);
+$body = json_encode([
+  'data' => [$event],
+  'test_event_code' => 'TEST34893'
+]);
 
 $url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
 
