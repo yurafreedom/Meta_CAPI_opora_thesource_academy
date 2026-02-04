@@ -46,10 +46,15 @@ $event = [
   'custom_data' => $payload['custom_data'] ?? null,
 ];
 
-$body = json_encode([
-  'data' => [$event],
-  'test_event_code' => 'TEST34893'
-]);
+$bodyArr = ['data' => [$event]];
+
+// TEST MODE (включить/выключить)
+$TEST_EVENT_CODE = getenv('META_TEST_EVENT_CODE'); // в Railway можно задать
+if (!empty($TEST_EVENT_CODE)) {
+  $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
+}
+
+$body = json_encode($bodyArr);
 
 $url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
 
