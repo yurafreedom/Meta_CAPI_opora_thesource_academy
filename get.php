@@ -1,58 +1,36 @@
 <?php
+// get.php
+header('Content-Type: application/json');
 
 // --- CORS ---
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
-
-// если хочешь строго — раскомментируй allowlist:
-// $allowed = ['https://opora.thesource.academy', 'https://www.opora.thesource.academy'];
-// if (in_array($origin, $allowed, true)) {
-//   header("Access-Control-Allow-Origin: $origin");
-// } else {
-//   header("Access-Control-Allow-Origin: https://opora.thesource.academy");
-// }
-
 header("Access-Control-Allow-Origin: $origin");
 header("Vary: Origin");
-header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
+header("Access-Control-Allow-Methods: GET, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type");
 header("Access-Control-Max-Age: 86400");
-
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-  http_response_code(204);
-  exit;
-}
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
 // --- /CORS ---
 
-header('Content-Type: application/json');
+function j($code, $arr) { http_response_code($code); echo json_encode($arr, JSON_UNESCAPED_UNICODE); exit; }
 
-$token = $_GET['token'] ?? '';
-if (!$token || !preg_match('/^[a-f0-9\-]{16,64}$/i', $token)) {
-  http_response_code(400);
-  echo json_encode(['error' => 'bad token']);
+$token = trim((string)($_GET['token'] ?? ''));
+if ($token === '') j(400, ['error' => 'bad token']);
+
+try {
+  $dbPath = __DIR__ . '/storage.sqlite';
+  $pdo = new PDO('sqlite:' . $dbPath);
+  $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+  $pdo->exec("CREATE TABLE IF NOT EXISTS leads (token TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at INTEGER NOT NULL);");
+
+  $stmt = $pdo->prepare("SELECT json FROM leads WHERE token = :token LIMIT 1");
+  $stmt->execute([':token' => $token]);
+  $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+  if (!$row) j(404, ['error' => 'not found']);
+  echo $row['json'];
   exit;
+} catch (Throwable $e) {
+  j(500, ['error' => 'db error', 'details' => $e->getMessage()]);
 }
-
-$dir = __DIR__ . '/tmp';
-$file = "$dir/$token.json";
-if (!file_exists($file)) {
-  http_response_code(404);
-  echo json_encode(['error' => 'not found']);
-  exit;
-}
-
-$data = json_decode(file_get_contents($file), true);
-if (!$data || empty($data['ph']) || empty($data['ts'])) {
-  http_response_code(500);
-  echo json_encode(['error' => 'corrupt']);
-  exit;
-}
-
-// TTL 2 часа
-if (time() - (int)$data['ts'] > 2*60*60) {
-  @unlink($file);
-  http_response_code(404);
-  echo json_encode(['error' => 'expired']);
-  exit;
-}
-
-echo json_encode(['ph' => $data['ph']]);
