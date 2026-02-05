@@ -1,4 +1,22 @@
 <?php
+
+// CORS
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+$allowed = ['https://opora.thesource.academy', 'https://opora.thesource.academy/']; // можно упростить
+
+if ($origin === 'https://opora.thesource.academy') {
+  header("Access-Control-Allow-Origin: $origin");
+  header("Vary: Origin");
+}
+header("Access-Control-Allow-Methods: POST, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type");
+header("Access-Control-Max-Age: 86400");
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+  http_response_code(204);
+  exit;
+}
+
 header('Content-Type: application/json');
 
 $raw = file_get_contents('php://input');
