@@ -1,14 +1,19 @@
 <?php
 
-// CORS
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-$allowed = ['https://opora.thesource.academy', 'https://opora.thesource.academy/']; // можно упростить
+// --- CORS ---
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
 
-if ($origin === 'https://opora.thesource.academy') {
-  header("Access-Control-Allow-Origin: $origin");
-  header("Vary: Origin");
-}
-header("Access-Control-Allow-Methods: POST, OPTIONS");
+// если хочешь строго — раскомментируй allowlist:
+// $allowed = ['https://opora.thesource.academy', 'https://www.opora.thesource.academy'];
+// if (in_array($origin, $allowed, true)) {
+//   header("Access-Control-Allow-Origin: $origin");
+// } else {
+//   header("Access-Control-Allow-Origin: https://opora.thesource.academy");
+// }
+
+header("Access-Control-Allow-Origin: $origin");
+header("Vary: Origin");
+header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type");
 header("Access-Control-Max-Age: 86400");
 
@@ -16,6 +21,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
   http_response_code(204);
   exit;
 }
+// --- /CORS ---
 
 header('Content-Type: application/json');
 
