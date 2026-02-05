@@ -1,5 +1,6 @@
 <?php
 // meta-capi.php
+
 // --- CORS ---
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
 
@@ -22,10 +23,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
   exit;
 }
 // --- /CORS ---
+
 header('Content-Type: application/json');
 
-$ACCESS_TOKEN = getenv('META_CAPI_TOKEN');   // задай на сервере
-$PIXEL_ID     = getenv('META_PIXEL_ID');     // задай на сервере
+$ACCESS_TOKEN = getenv('META_CAPI_TOKEN');   // set on server
+$PIXEL_ID     = getenv('META_PIXEL_ID');     // set on server
 $API_VERSION  = 'v21.0';
 
 if (!$ACCESS_TOKEN || !$PIXEL_ID) {
@@ -43,26 +45,51 @@ if (!$payload || empty($payload['event_name'])) {
   exit;
 }
 
-$event = [
+// helper: remove null/empty string but keep 0/"0"/false if ever needed
+function compact_filter($v) {
+  if ($v === null) return false;
+  if (is_string($v) && trim($v) === '') return false;
+  return true;
+}
+
+// event_time: accept from client (seconds), fallback to now
+$event_time = !empty($payload['event_time']) ? intval($payload['event_time']) : time();
+if ($event_time < 1000000000) { // safety: if someone sent ms or garbage
+  $event_time = time();
+}
+
+$user = is_array($payload['user'] ?? null) ? $payload['user'] : [];
+
+$user_data = array_filter([
+  'em'  => $user['em']  ?? null, // sha256 hex
+  'ph'  => $user['ph']  ?? null, // sha256 hex
+  'fn'  => $user['fn']  ?? null, // sha256 hex
+  'fbp' => $user['fbp'] ?? null,
+  'fbc' => $user['fbc'] ?? null,
+  'external_id' => $user['external_id'] ?? null,
+], 'compact_filter');
+
+// build event and drop nulls (incl. event_source_url/custom_data if not provided)
+$event = array_filter([
   'event_name' => $payload['event_name'],
-  'event_time' => time(),
+  'event_time' => $event_time,
   'action_source' => 'website',
   'event_source_url' => $payload['event_source_url'] ?? null,
-  'user_data' => array_filter([
-    'em'  => $payload['user']['em']  ?? null, // hashed sha256 hex
-    'ph'  => $payload['user']['ph']  ?? null, // <-- добавили phone
-    'fn'  => $payload['user']['fn']  ?? null, // hashed sha256 hex, если используешь
-    'fbp' => $payload['user']['fbp'] ?? null,
-    'fbc' => $payload['user']['fbc'] ?? null,
-    'external_id' => $payload['user']['external_id'] ?? null,
-  ]),
+  'user_data' => $user_data,
   'custom_data' => $payload['custom_data'] ?? null,
-];
+], 'compact_filter');
+
+// require at least some user_data (otherwise Meta часто режет пользу)
+if (empty($event['user_data'])) {
+  http_response_code(400);
+  echo json_encode(['error' => 'Missing user_data (need at least ph/em/fbp/fbc/external_id)']);
+  exit;
+}
 
 $bodyArr = ['data' => [$event]];
 
-// TEST MODE (включить/выключить)
-$TEST_EVENT_CODE = getenv('META_TEST_EVENT_CODE'); // в Railway можно задать
+// TEST MODE (optional)
+$TEST_EVENT_CODE = getenv('META_TEST_EVENT_CODE'); // e.g. TEST71361
 if (!empty($TEST_EVENT_CODE)) {
   $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
 }
