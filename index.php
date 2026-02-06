@@ -20,6 +20,8 @@ function upstash_lpush($key, $valueArr){
     'Content-Type: application/json'
   ]);
   curl_setopt($ch, CURLOPT_POST, true);
+  // Upstash REST expects JSON array of args. For LPUSH: [key, value1, value2...]
+  // But when using /lpush/<key>, body should be [value1, value2...]
   curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([$valueArr], JSON_UNESCAPED_UNICODE));
 
   $resp = curl_exec($ch);
@@ -29,16 +31,25 @@ function upstash_lpush($key, $valueArr){
   return [$code, $resp];
 }
 
-$token = trim($_GET['token'] ?? '');
-$ph    = preg_replace('/\D+/', '', $_GET['ph'] ?? '');
+$token     = trim($_GET['token'] ?? '');
+$ph_sha256 = strtolower(trim($_GET['ph_sha256'] ?? ''));
 
-if ($token === '' || $ph === '') {
-  out(200, ['ok'=>true, 'service'=>'alive', 'hint'=>'pass ?token=...&ph=...']);
+// строгая валидация sha256 hex (64 символа)
+if ($ph_sha256 !== '' && !preg_match('/^[a-f0-9]{64}$/', $ph_sha256)) {
+  $ph_sha256 = ''; // считаем невалидным
+}
+
+if ($token === '' || $ph_sha256 === '') {
+  out(200, [
+    'ok' => true,
+    'service' => 'alive',
+    'hint' => 'pass ?token=...&ph_sha256=<64-hex>'
+  ]);
 }
 
 $record = [
   'token' => $token,
-  'ph' => $ph,
+  'ph_sha256' => $ph_sha256,
   'ts' => (int)($_GET['ts'] ?? time()*1000),
   'ts_server' => time(),
   'reason' => (string)($_GET['r'] ?? 'root_collect'),
