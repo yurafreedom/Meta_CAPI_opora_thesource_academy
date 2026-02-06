@@ -1,5 +1,4 @@
 <?php
-// store.php
 header('Content-Type: application/json');
 
 // --- CORS ---
@@ -12,83 +11,65 @@ header("Access-Control-Max-Age: 86400");
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
 // --- /CORS ---
 
-function j($code, $arr) { http_response_code($code); echo json_encode($arr, JSON_UNESCAPED_UNICODE); exit; }
-function compact_filter($v) {
-  if ($v === null) return false;
-  if (is_string($v) && trim($v) === '') return false;
-  return true;
+function out($code, $arr) {
+  http_response_code($code);
+  echo json_encode($arr, JSON_UNESCAPED_UNICODE);
+  exit;
 }
-function digits_only($s) { return preg_replace('/\D+/', '', (string)$s); }
 
 $raw = file_get_contents('php://input');
-$p = json_decode($raw, true);
-if (!is_array($p)) j(400, ['error' => 'bad json']);
+$data = json_decode($raw, true);
+if (!is_array($data)) out(400, ['error' => 'invalid json']);
 
-$token = trim((string)($p['token'] ?? ''));
-if ($token === '') j(400, ['error' => 'missing token']);
-
-// берем телефон из любых полей, которые у тебя реально приходят
-$phone_raw   = trim((string)($p['phone_raw'] ?? ''));
-$phone_e164  = trim((string)($p['phone_e164'] ?? ''));
-$phone_digits = trim((string)($p['phone_digits'] ?? ''));
-
-// нормализация
-if ($phone_digits === '') $phone_digits = digits_only($phone_raw);
-$norm = $phone_e164 !== '' ? $phone_e164 : $phone_digits;
-if ($norm === '') j(400, ['error' => 'missing phone (need phone_raw/phone_digits/phone_e164)']);
-
-// Meta ожидает sha256 HEX от нормализованного телефона (digits или +E164)
-$ph_sha256 = hash('sha256', $norm);
-
-$lead = array_filter([
-  'token' => $token,
-  'ts' => (int)($p['ts'] ?? time()*1000),
-  'reason' => $p['reason'] ?? null,
-  'page_url' => $p['page_url'] ?? null,
-  'referrer' => $p['referrer'] ?? null,
-  'name' => $p['name'] ?? null,
-
-  'phone_raw' => $phone_raw ?: null,
-  'phone_digits' => $phone_digits ?: null,
-  'phone_e164' => $phone_e164 ?: null,
-
-  'ph_sha256' => $ph_sha256,
-
-  'utm_source' => $p['utm_source'] ?? null,
-  'utm_campaign' => $p['utm_campaign'] ?? null,
-  'utm_term' => $p['utm_term'] ?? null,
-  'utm_content' => $p['utm_content'] ?? null,
-], 'compact_filter');
-
-try {
-  $dbPath = __DIR__ . '/storage.sqlite';
-  $pdo = new PDO('sqlite:' . $dbPath);
-  $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-  $pdo->exec("
-    CREATE TABLE IF NOT EXISTS leads (
-      token TEXT PRIMARY KEY,
-      json  TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-  ");
-
-  $stmt = $pdo->prepare("
-    INSERT INTO leads(token, json, updated_at)
-    VALUES(:token, :json, :t)
-    ON CONFLICT(token) DO UPDATE SET
-      json = excluded.json,
-      updated_at = excluded.updated_at
-  ");
-
-  $now = time();
-  $stmt->execute([
-    ':token' => $token,
-    ':json' => json_encode($lead, JSON_UNESCAPED_UNICODE),
-    ':t' => $now
-  ]);
-
-  j(200, ['ok' => true, 'token' => $token, 'ph_sha256' => $ph_sha256]);
-} catch (Throwable $e) {
-  j(500, ['error' => 'db error', 'details' => $e->getMessage()]);
+// token
+$token = trim((string)($data['token'] ?? ''));
+if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $token)) {
+  out(400, ['error' => 'bad token']);
 }
+
+// phone
+$phone_raw    = trim((string)($data['phone_raw'] ?? ''));
+$phone_e164   = trim((string)($data['phone_e164'] ?? ''));
+$phone_digits = trim((string)($data['phone_digits'] ?? ''));
+
+if ($phone_raw === '' && $phone_e164 === '' && $phone_digits === '') {
+  out(400, ['error' => 'missing phone (phone_raw/phone_e164/phone_digits)']);
+}
+
+// ensure dir
+$dir = __DIR__ . '/data';
+if (!is_dir($dir) && !mkdir($dir, 0777, true)) {
+  out(500, ['error' => 'cannot create data dir']);
+}
+
+$record = [
+  'token' => $token,
+  'ts' => (int)($data['ts'] ?? (int)(microtime(true) * 1000)),
+  'ts_server' => time(),
+  'reason' => (string)($data['reason'] ?? 'unknown'),
+  'page_url' => (string)($data['page_url'] ?? ''),
+  'referrer' => (string)($data['referrer'] ?? ''),
+  'name' => (string)($data['name'] ?? ''),
+  'phone_raw' => $phone_raw,
+  'phone_digits' => $phone_digits,
+  'phone_e164' => $phone_e164,
+  'phone_is_valid' => $data['phone_is_valid'] ?? null,
+  'utm_source' => (string)($data['utm_source'] ?? ''),
+  'utm_campaign' => (string)($data['utm_campaign'] ?? ''),
+  'utm_term' => (string)($data['utm_term'] ?? ''),
+  'utm_content' => (string)($data['utm_content'] ?? ''),
+];
+
+// atomic write
+$tmp = $dir . '/' . $token . '.json.tmp';
+$dst = $dir . '/' . $token . '.json';
+
+if (file_put_contents($tmp, json_encode($record, JSON_UNESCAPED_UNICODE), LOCK_EX) === false) {
+  out(500, ['error' => 'write failed']);
+}
+if (!rename($tmp, $dst)) {
+  @unlink($tmp);
+  out(500, ['error' => 'rename failed']);
+}
+
+out(200, ['ok' => true, 'token' => $token]);
