@@ -1,32 +1,34 @@
 <?php
-// collect.php — принимает GET и сохраняет в /data/<token>.json
 header('Content-Type: application/json');
-header('Cache-Control: no-store, max-age=0');
+header("Access-Control-Allow-Origin: *");
+
+function out($code, $arr){ http_response_code($code); echo json_encode($arr, JSON_UNESCAPED_UNICODE); exit; }
 
 $token = trim($_GET['token'] ?? '');
-if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $token)) {
-  http_response_code(400);
-  echo json_encode(['error'=>'bad token']);
-  exit;
-}
+$ph    = preg_replace('/\D+/', '', $_GET['ph'] ?? '');
+if ($token === '' || $ph === '') out(400, ['error'=>'bad params']);
 
 $dir = __DIR__ . '/data';
 if (!is_dir($dir)) @mkdir($dir, 0777, true);
 
-$payload = [
+$record = [
   'token' => $token,
-  'ts' => (int)($_GET['ts'] ?? round(microtime(true)*1000)),
+  'ph' => $ph,
+  'ts' => (int)($_GET['ts'] ?? time()*1000),
   'ts_server' => time(),
-  'reason' => (string)($_GET['r'] ?? 'submit'),
+  'reason' => (string)($_GET['r'] ?? ''),
   'page_url' => (string)($_GET['u'] ?? ''),
   'referrer' => (string)($_GET['ref'] ?? ''),
   'name' => (string)($_GET['name'] ?? ''),
-  'phone_digits' => (string)($_GET['ph'] ?? ''),
   'utm_source' => (string)($_GET['utm_source'] ?? ''),
   'utm_campaign' => (string)($_GET['utm_campaign'] ?? ''),
   'utm_term' => (string)($_GET['utm_term'] ?? ''),
   'utm_content' => (string)($_GET['utm_content'] ?? ''),
 ];
 
-file_put_contents($dir . '/' . $token . '.json', json_encode($payload, JSON_UNESCAPED_UNICODE));
-echo json_encode(['ok'=>true]);
+$tmp = $dir . "/{$token}.json.tmp";
+$dst = $dir . "/{$token}.json";
+file_put_contents($tmp, json_encode($record, JSON_UNESCAPED_UNICODE), LOCK_EX);
+rename($tmp, $dst);
+
+out(200, ['ok'=>true]);
