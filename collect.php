@@ -1,12 +1,18 @@
 <?php
-header('Content-Type: application/json');
-header("Access-Control-Allow-Origin: *");
+// collect.php — принимает GET-параметры, пишет data/<token>.json и возвращает 1x1 GIF
 
-function out($code, $arr){ http_response_code($code); echo json_encode($arr, JSON_UNESCAPED_UNICODE); exit; }
+function gif1x1() {
+  header('Content-Type: image/gif');
+  header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+  header('Pragma: no-cache');
+  // 1x1 transparent GIF
+  echo base64_decode('R0lGODlhAQABAPAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==');
+  exit;
+}
 
 $token = trim($_GET['token'] ?? '');
 $ph    = preg_replace('/\D+/', '', $_GET['ph'] ?? '');
-if ($token === '' || $ph === '') out(400, ['error'=>'bad params']);
+if ($token === '' || $ph === '') gif1x1();
 
 $dir = __DIR__ . '/data';
 if (!is_dir($dir)) @mkdir($dir, 0777, true);
@@ -14,7 +20,7 @@ if (!is_dir($dir)) @mkdir($dir, 0777, true);
 $record = [
   'token' => $token,
   'ph' => $ph,
-  'ts' => (int)($_GET['ts'] ?? time()*1000),
+  'ts' => (int)($_GET['ts'] ?? (int)(microtime(true)*1000)),
   'ts_server' => time(),
   'reason' => (string)($_GET['r'] ?? ''),
   'page_url' => (string)($_GET['u'] ?? ''),
@@ -28,7 +34,7 @@ $record = [
 
 $tmp = $dir . "/{$token}.json.tmp";
 $dst = $dir . "/{$token}.json";
-file_put_contents($tmp, json_encode($record, JSON_UNESCAPED_UNICODE), LOCK_EX);
-rename($tmp, $dst);
+@file_put_contents($tmp, json_encode($record, JSON_UNESCAPED_UNICODE), LOCK_EX);
+@rename($tmp, $dst);
 
-out(200, ['ok'=>true]);
+gif1x1();
