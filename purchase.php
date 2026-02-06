@@ -1,11 +1,7 @@
 <?php
 header('Content-Type: application/json');
 
-function out($c,$a){
-  http_response_code($c);
-  echo json_encode($a, JSON_UNESCAPED_UNICODE);
-  exit;
-}
+function out($c,$a){ http_response_code($c); echo json_encode($a, JSON_UNESCAPED_UNICODE); exit; }
 
 function upstash_request($path, $method = 'GET', $jsonBody = null){
   $url   = getenv('UPSTASH_REDIS_REST_URL');
@@ -33,68 +29,41 @@ function upstash_request($path, $method = 'GET', $jsonBody = null){
   return [$code, $resp];
 }
 
-function upstash_get_value($key){
-  list($code, $resp) = upstash_request('/get/' . rawurlencode($key));
-  if (!($code >= 200 && $code < 300)) return [$code, $resp, null];
-
-  $j = json_decode($resp, true);
-  // Upstash обычно возвращает {"result": "..."} или {"result": null}
-  $val = is_array($j) && array_key_exists('result', $j) ? $j['result'] : null;
-  return [$code, $resp, $val];
-}
-
-function upstash_exists($key){
-  list($code, $resp) = upstash_request('/exists/' . rawurlencode($key));
-  if (!($code >= 200 && $code < 300)) return [$code, $resp, false];
-  $j = json_decode($resp, true);
-  $n = is_array($j) && array_key_exists('result', $j) ? intval($j['result']) : 0;
-  return [$code, $resp, $n > 0];
-}
-
-function upstash_set_ttl($key, $value, $ttlSeconds){
-  list($code, $resp) = upstash_request('/set/' . rawurlencode($key) . '/' . rawurlencode($value));
-  if (!($code >= 200 && $code < 300)) return [$code, $resp];
-  list($code2, $resp2) = upstash_request('/expire/' . rawurlencode($key) . '/' . intval($ttlSeconds));
-  if (!($code2 >= 200 && $code2 < 300)) return [$code2, $resp2];
-  return [$code, $resp];
-}
-
-// ---- input ----
 $token = trim($_GET['token'] ?? '');
 if ($token === '') out(400, ['error'=>'bad token']);
 
-// 1) дедуп (чтобы /thanks можно было безопасно перезагружать)
-$dedupKey = 'purchase_done:' . $token;
-list($ec, $er, $exists) = upstash_exists($dedupKey);
-if ($exists) out(200, ['ok'=>true, 'dedup'=>true]);
+// 1) забираем лид из Upstash: GET lead:<token>
+$key = 'lead:' . $token;
+list($code, $resp) = upstash_request('/get/' . rawurlencode($key));
+if ($code < 200 || $code >= 300) out(500, ['error'=>'upstash_get_failed', 'code'=>$code, 'resp'=>$resp]);
 
-// 2) достаем лид из Upstash
-$leadKey = 'lead:' . $token;
-list($gc, $gr, $leadRaw) = upstash_get_value($leadKey);
-if (!($gc >= 200 && $gc < 300)) out(500, ['error'=>'upstash_get_failed', 'debug'=>[$gc,$gr]]);
-if ($leadRaw === null || $leadRaw === '') out(404, ['error'=>'lead not found']);
+$raw = json_decode($resp, true);
+// Upstash REST обычно возвращает {"result":"...json..."} или {"result":null}
+$leadJson = $raw['result'] ?? null;
+if (!$leadJson) out(404, ['error'=>'lead not found']);
 
-// leadRaw — строка с JSON
-$lead = json_decode($leadRaw, true);
-
-// иногда может быть ситуация двойного JSON (если где-то уже сохраняли массив как строку в строке)
-if (!is_array($lead)) {
-  $tmp = json_decode($leadRaw, true);
-  if (is_array($tmp)) $lead = $tmp;
-}
-if (!is_array($lead)) out(500, ['error'=>'corrupt lead', 'raw'=>$leadRaw]);
+$lead = json_decode($leadJson, true);
+if (!is_array($lead)) out(500, ['error'=>'corrupt lead', 'leadJson'=>$leadJson]);
 
 $ph_sha256 = strtolower(trim($lead['ph_sha256'] ?? ''));
-if ($ph_sha256 === '' || !preg_match('/^[a-f0-9]{64}$/', $ph_sha256)) {
-  out(400, ['error'=>'no ph_sha256 in lead']);
-}
+if ($ph_sha256 === '') out(400, ['error'=>'no ph_sha256 in lead']);
 
-// 3) шлем Purchase в meta-capi.php
+// 2) дедуп (в Upstash, чтобы не стрелять Purchase много раз)
+$doneKey = 'purchase_done:' . $token;
+list($c2, $r2) = upstash_request('/setnx/' . rawurlencode($doneKey) . '/1');
+$nx = json_decode($r2, true);
+$wasSet = ($nx['result'] ?? 0) == 1;
+
+if (!$wasSet) out(200, ['ok'=>true, 'dedup'=>true]);
+
+// TTL для дедупа (например 30 дней)
+upstash_request('/expire/' . rawurlencode($doneKey) . '/' . (60*60*24*30));
+
+// 3) формируем payload и дергаем meta-capi.php
 $payload = [
   'event_name' => 'Purchase',
   'event_time' => time(),
   'event_source_url' => $lead['page_url'] ?? ($_GET['u'] ?? ''),
-  'event_id' => $token, // дедуп в Meta
   'lead' => [
     'ph_sha256' => $ph_sha256,
     'token' => $token,
@@ -112,18 +81,14 @@ curl_setopt_array($ch, [
   CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
   CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
-  CURLOPT_TIMEOUT => 10,
+  CURLOPT_TIMEOUT => 8,
 ]);
 $res = curl_exec($ch);
 $err = curl_error($ch);
-$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$hcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 
 if ($err) out(500, ['error'=>$err]);
-if ($code < 200 || $code >= 300) out($code ?: 500, ['error'=>'meta failed', 'resp'=>$res]);
+if ($hcode < 200 || $hcode >= 300) out($hcode ?: 500, ['error'=>'meta failed', 'resp'=>$res]);
 
-// 4) ставим дедуп-маркер в Upstash на 30 дней
-upstash_set_ttl($dedupKey, '1', 60*60*24*30);
-
-http_response_code(200);
-echo $res;
+out(200, ['ok'=>true, 'meta'=>$res]);
