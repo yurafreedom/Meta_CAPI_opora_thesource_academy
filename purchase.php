@@ -7,7 +7,7 @@ function out($c, $a){
   exit;
 }
 
-function upstash_request($path, $method = 'GET', $jsonBody = null){
+function upstash_request($path, $method='GET', $jsonBody=null){
   $url   = getenv('UPSTASH_REDIS_REST_URL');
   $token = getenv('UPSTASH_REDIS_REST_TOKEN');
   if (!$url || !$token) return [0, 'missing_upstash_env'];
@@ -34,24 +34,19 @@ function upstash_request($path, $method = 'GET', $jsonBody = null){
 }
 
 function upstash_lpush_json($key, $valueArr){
-  // Upstash REST LPUSH: POST body must be [value]
   return upstash_request('/lpush/' . rawurlencode($key), 'POST', [ $valueArr ]);
 }
 
-function upstash_get_json($key){
+function upstash_get_raw($key){
   list($code, $resp) = upstash_request('/get/' . rawurlencode($key));
   if (!($code >= 200 && $code < 300)) return [$code, $resp, null];
 
   $data = json_decode($resp, true);
-  $result = $data['result'] ?? null;
-  if ($result === null) return [$code, $resp, null];
-
-  // result is usually stringified JSON
-  $decoded = is_string($result) ? json_decode($result, true) : $result;
-  return [$code, $resp, $decoded];
+  $result = $data['result'] ?? null;   // string|null
+  return [$code, $resp, $result];
 }
 
-function upstash_set($key, $value, $ttlSeconds = 60*60*24*14){
+function upstash_set($key, $value, $ttlSeconds = 60*60*24*30){
   list($code1, $resp1) = upstash_request('/set/' . rawurlencode($key) . '/' . rawurlencode($value));
   if (!($code1 >= 200 && $code1 < 300)) return [$code1, $resp1];
 
@@ -61,118 +56,171 @@ function upstash_set($key, $value, $ttlSeconds = 60*60*24*14){
   return [$code1, $resp1];
 }
 
-// ---- debug logging ----
+function try_json_decode($x){
+  if ($x === null) return null;
+  if (is_array($x) || is_object($x)) return $x;
+  if (!is_string($x)) return null;
+
+  $x = trim($x);
+  if ($x === '') return null;
+
+  $decoded = json_decode($x, true);
+  if (json_last_error() === JSON_ERROR_NONE) return $decoded;
+
+  return null;
+}
+
+/**
+ * Нормализуем "lead" из Upstash:
+ * варианты, которые реально встречаются:
+ * 1) '{"token":"...","ph_sha256":"..."}'
+ * 2) '[{"token":"...","ph_sha256":"..."}]'
+ * 3) '["{\"token\":\"...\",\"ph_sha256\":\"...\"}"]'   <-- твой случай (двойное кодирование)
+ * 4) ["{...}"] (после одного decode)
+ */
+function normalize_lead($raw){
+  // raw — это string|null из Upstash result
+  $v1 = try_json_decode($raw);
+
+  // если не декодится — значит это не JSON вообще
+  if ($v1 === null) return null;
+
+  // если это массив и внутри 1-й элемент строка JSON — декодим ещё раз
+  if (is_array($v1) && isset($v1[0]) && is_string($v1[0])) {
+    $v2 = try_json_decode($v1[0]);
+    if (is_array($v2)) {
+      // если это массив объектов — берём первый
+      if (isset($v2[0]) && is_array($v2[0])) return $v2[0];
+      return $v2;
+    }
+  }
+
+  // если это массив объектов — берём первый
+  if (is_array($v1) && isset($v1[0]) && is_array($v1[0])) return $v1[0];
+
+  // если это объект-массив — возвращаем как есть
+  if (is_array($v1)) return $v1;
+
+  return null;
+}
+
+// ---------------- debug logging ----------------
 $DEBUG_ID = 'p_' . substr(bin2hex(random_bytes(8)), 0, 16);
-$token = ''; // объявим заранее, чтобы log_step не ругался
 
 function log_step($step, $data = [], $level = 'info'){
-  global $DEBUG_ID, $token;
-
+  global $DEBUG_ID;
   $row = [
     'debug_id' => $DEBUG_ID,
     'level' => $level,
     'step' => $step,
-    'token' => $token ?? '',
     'ts_server' => time(),
     'data' => $data
   ];
-
   // пишем в Upstash LIST purchase_logs
   upstash_lpush_json('purchase_logs', $row);
 }
 
-// -------- input --------
+// ---------------- input (token) ----------------
+// Нормальный вариант: ?token=...
 $token = trim($_GET['token'] ?? '');
-if ($token === '') {
-  // лог даже для bad token полезен
-  log_step('0_input_bad_token', ['query' => $_GET], 'error');
-  out(400, ['error'=>'bad token', 'debug_id'=>$DEBUG_ID]);
+
+// Поддержка твоей ошибочной формы: /purchase.php?<uuid> (без token=)
+if ($token === '' && count($_GET) === 1) {
+  $keys = array_keys($_GET);
+  $maybe = trim($keys[0]);
+  // если ключ похож на uuid — принимаем как token
+  if (preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i', $maybe)) {
+    $token = $maybe;
+  }
 }
 
-log_step('0_input_ok', [
-  'token' => $token,
-  'u' => (string)($_GET['u'] ?? ''),
-  'value' => (string)($_GET['value'] ?? ''),
-  'currency' => (string)($_GET['currency'] ?? '')
-]);
+if ($token === '') {
+  log_step('input', ['query' => $_SERVER['QUERY_STRING'] ?? ''], 'error');
+  out(400, ['error' => 'bad token', 'debug_id' => $DEBUG_ID, 'hint' => 'use ?token=UUID']);
+}
+
+log_step('input', ['token' => $token]);
 
 // 1) дедуп покупки
-log_step('1_dedup_check_start', ['key' => 'purchase:' . $token]);
+list($dc, $dr, $dedupRaw) = upstash_get_raw('purchase:' . $token);
+log_step('dedup_check', ['key' => 'purchase:' . $token, 'http' => $dc, 'result' => $dedupRaw]);
 
-list($dc, $dr, $already) = upstash_get_json('purchase:' . $token);
-
-log_step('1_dedup_check_result', [
-  'http' => $dc,
-  'already' => (bool)$already,
-  'raw' => is_string($dr) ? mb_substr($dr, 0, 400) : $dr,
-]);
-
-if ($already) {
-  out(200, ['ok'=>true, 'dedup'=>true, 'debug_id'=>$DEBUG_ID]);
+if ($dedupRaw) {
+  out(200, ['ok' => true, 'dedup' => true, 'debug_id' => $DEBUG_ID]);
 }
 
 // 2) достаём лид из Upstash
-log_step('2_get_lead_start', ['key' => 'lead:' . $token]);
+list($lc, $lr, $leadRaw) = upstash_get_raw('lead:' . $token);
+log_step('lead_get_raw', [
+  'key' => 'lead:' . $token,
+  'http' => $lc,
+  'has_result' => $leadRaw !== null,
+  'result_preview' => is_string($leadRaw) ? substr($leadRaw, 0, 200) : $leadRaw
+]);
 
-list($code, $raw, $lead) = upstash_get_json('lead:' . $token);
-
-log_step('2_get_lead_result', [
-  'http' => $code,
-  'has_lead' => (bool)$lead,
-  'raw' => is_string($raw) ? mb_substr($raw, 0, 700) : $raw,
+$lead = normalize_lead($leadRaw);
+log_step('lead_normalized', [
+  'ok' => is_array($lead),
+  'type' => gettype($lead),
+  'keys' => is_array($lead) ? array_keys($lead) : null,
+  'sample0' => (is_array($lead) && isset($lead[0])) ? (is_string($lead[0]) ? substr($lead[0],0,120) : $lead[0]) : null
 ]);
 
 if (!$lead) {
-  log_step('2_get_lead_failed', ['reason'=>'lead_not_found'], 'error');
-  out(404, ['error'=>'lead not found', 'debug_id'=>$DEBUG_ID, 'upstash'=>[$code, is_string($raw)?mb_substr($raw,0,500):$raw]]);
+  out(404, [
+    'error' => 'lead not found',
+    'debug_id' => $DEBUG_ID,
+    'upstash' => ['http' => $lc, 'raw_preview' => is_string($leadRaw) ? substr($leadRaw, 0, 200) : $leadRaw]
+  ]);
 }
 
-// иногда lead мог сохраниться как массив [ {..} ] — нормализуем
-if (is_array($lead) && isset($lead[0]) && is_array($lead[0])) {
-  log_step('2_lead_normalized_from_array');
-  $lead = $lead[0];
-}
-
-// проверка ph_sha256
+// 2.1) ph_sha256 — берём как есть
 $ph_sha256 = strtolower(trim($lead['ph_sha256'] ?? ''));
-log_step('2_ph_sha256_check', [
-  'present' => ($ph_sha256 !== ''),
-  'lead_keys' => is_array($lead) ? array_keys($lead) : null
-]);
+
+// запасной вариант: если вдруг сохранилось как lead->lead->ph_sha256
+if ($ph_sha256 === '' && isset($lead['lead']) && is_array($lead['lead'])) {
+  $ph_sha256 = strtolower(trim($lead['lead']['ph_sha256'] ?? ''));
+}
 
 if ($ph_sha256 === '') {
-  log_step('2_ph_sha256_missing', ['lead' => $lead], 'error');
-  out(400, ['error'=>'no ph_sha256 in lead', 'debug_id'=>$DEBUG_ID]);
+  log_step('lead_missing_ph_sha256', ['lead' => $lead], 'error');
+  out(400, ['error' => 'no ph_sha256 in lead', 'debug_id' => $DEBUG_ID]);
 }
+
+log_step('lead_ok', ['ph_sha256_prefix' => substr($ph_sha256, 0, 10) . '...']);
 
 // 3) собираем payload
 $value = (float)($_GET['value'] ?? 1);
 $currency = (string)($_GET['currency'] ?? 'UAH');
 
-$event_source_url = $lead['page_url'] ?? ($_GET['u'] ?? '');
-
 $payload = [
   'event_name' => 'Purchase',
   'event_time' => time(),
-  'event_source_url' => $event_source_url,
+  'event_source_url' => $lead['page_url'] ?? ($_GET['u'] ?? ''),
   'lead' => [
     'ph_sha256' => $ph_sha256,
     'token' => $token,
     'value' => $value,
     'currency' => $currency
   ],
-  'custom_data' => ['value'=>$value, 'currency'=>$currency],
+  'custom_data' => ['value' => $value, 'currency' => $currency],
 ];
 
-log_step('3_payload_built', [
-  'event_source_url' => $event_source_url,
+log_step('payload_built', [
+  'event_source_url' => $payload['event_source_url'],
   'value' => $value,
   'currency' => $currency
 ]);
 
 // 4) вызываем meta-capi.php
-$metaUrl = (isset($_SERVER['HTTPS']) ? "https" : "http") . "://{$_SERVER['HTTP_HOST']}/meta-capi.php";
-log_step('4_meta_call_start', ['metaUrl' => $metaUrl]);
+$metaUrl = getenv('META_CAPI_URL');
+if (!$metaUrl) {
+  $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+  $host = $_SERVER['HTTP_HOST'] ?? '';
+  $metaUrl = $scheme . '://' . $host . '/meta-capi.php';
+}
+
+log_step('meta_call_start', ['meta_url' => $metaUrl]);
 
 $ch = curl_init($metaUrl);
 curl_setopt_array($ch, [
@@ -187,23 +235,17 @@ $err = curl_error($ch);
 $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 
-log_step('4_meta_call_result', [
+log_step('meta_call_end', [
   'http' => $http,
-  'curl_err' => $err ?: null,
-  'resp' => is_string($res) ? mb_substr($res, 0, 900) : $res
+  'err' => $err ? $err : null,
+  'resp_preview' => is_string($res) ? substr($res, 0, 300) : $res
 ], ($err || $http < 200 || $http >= 300) ? 'error' : 'info');
 
-if ($err) out(500, ['error'=>$err, 'debug_id'=>$DEBUG_ID]);
-if ($http < 200 || $http >= 300) out($http ?: 500, ['error'=>'meta failed', 'resp'=>$res, 'debug_id'=>$DEBUG_ID]);
+if ($err) out(500, ['error' => $err, 'debug_id' => $DEBUG_ID]);
+if ($http < 200 || $http >= 300) out($http ?: 500, ['error' => 'meta failed', 'resp' => $res, 'debug_id' => $DEBUG_ID]);
 
 // 5) ставим дедуп-флаг
-log_step('5_dedup_set_start', ['key' => 'purchase:' . $token]);
+upstash_set('purchase:' . $token, '1', 60*60*24*30);
+log_step('dedup_set', ['key' => 'purchase:' . $token]);
 
-list($sc, $sr) = upstash_set('purchase:' . $token, '1', 60*60*24*30);
-
-log_step('5_dedup_set_result', [
-  'http' => $sc,
-  'raw' => is_string($sr) ? mb_substr($sr, 0, 300) : $sr
-], ($sc < 200 || $sc >= 300) ? 'error' : 'info');
-
-out(200, ['ok'=>true, 'debug_id'=>$DEBUG_ID, 'meta'=>$res]);
+out(200, ['ok' => true, 'debug_id' => $DEBUG_ID, 'meta' => $res]);
