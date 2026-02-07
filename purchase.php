@@ -264,46 +264,94 @@ log_step('payload_built', [
 ]);
 
 // 4) meta-capi.php
-$metaUrl = getenv('META_CAPI_URL');
-if (!$metaUrl) {
-  $scheme = detect_scheme();
-  $host   = detect_host();
-  $metaUrl = $scheme . '://' . $host . '/meta-capi.php';
+// 4) SEND DIRECTLY TO META GRAPH (NO self-call)
+
+$ACCESS_TOKEN    = getenv('META_CAPI_TOKEN');
+$PIXEL_ID        = getenv('META_PIXEL_ID');
+$TEST_EVENT_CODE = getenv('META_TEST_EVENT_CODE');
+$API_VERSION     = 'v21.0';
+
+if (!$ACCESS_TOKEN || !$PIXEL_ID) {
+  out(500, ['error' => 'missing META_CAPI_TOKEN or META_PIXEL_ID', 'debug_id' => $DEBUG_ID]);
 }
 
-log_step('meta_call_start', ['meta_url' => $metaUrl]);
+// user_data (Meta expects ph/em as arrays)
+$user_data = array_filter([
+  'ph' => $ph_sha256 ? [$ph_sha256] : null,
+  'external_id' => $token ? [$token] : null,
+  'client_user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+], function($v){
+  if ($v === null) return false;
+  if (is_string($v) && trim($v) === '') return false;
+  if (is_array($v) && count($v) === 0) return false;
+  return true;
+});
 
-$ch = curl_init($metaUrl);
+$event = array_filter([
+  'event_name' => 'Purchase',
+  'event_time' => time(),
+  'action_source' => 'website',
+  'event_source_url' => $payload['event_source_url'] ?? '',
+  'user_data' => $user_data,
+  'custom_data' => [
+    'currency' => $currency,
+    'value' => $value,
+  ],
+], function($v){
+  if ($v === null) return false;
+  if (is_string($v) && trim($v) === '') return false;
+  return true;
+});
+
+$bodyArr = ['data' => [$event]];
+if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
+
+$url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
+
+$ch = curl_init($url);
 curl_setopt_array($ch, [
   CURLOPT_POST => true,
   CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-  CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
-  CURLOPT_CONNECTTIMEOUT => 5,
-  CURLOPT_TIMEOUT => 15,
+  CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
 
-  CURLOPT_FOLLOWLOCATION => true,
-  CURLOPT_MAXREDIRS => 3,
+  CURLOPT_CONNECTTIMEOUT => 5,
+  CURLOPT_TIMEOUT => 28,
+  CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
 ]);
 
-$res = curl_exec($ch);
-$err = curl_error($ch);
+$res  = curl_exec($ch);
+$errno = curl_errno($ch);
+$err  = curl_error($ch);
 $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$time = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
 $eff  = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
 curl_close($ch);
 
-log_step('meta_call_end', [
+log_step('meta_graph', [
   'http' => $http,
+  'errno' => $errno,
+  'err' => $err ?: null,
+  'time' => $time,
   'effective_url' => $eff,
-  'err' => $err ? $err : null,
-  'resp_preview' => is_string($res) ? substr($res, 0, 400) : $res
-], ($err || $http < 200 || $http >= 300) ? 'error' : 'info');
+  'resp_preview' => is_string($res) ? substr($res, 0, 500) : $res,
+  'sent_preview' => substr(json_encode($bodyArr, JSON_UNESCAPED_UNICODE), 0, 500),
+], (($errno > 0) || $http < 200 || $http >= 300) ? 'error' : 'info');
 
-if ($err) out(500, ['error' => $err, 'debug_id' => $DEBUG_ID, 'meta_http' => $http, 'effective_url' => $eff]);
-if ($http < 200 || $http >= 300) out($http ?: 500, ['error' => 'meta failed', 'resp' => $res, 'debug_id' => $DEBUG_ID, 'meta_http' => $http, 'effective_url' => $eff]);
+if ($errno > 0) out(500, [
+  'error' => 'curl_errno',
+  'errno' => $errno,
+  'message' => $err,
+  'debug_id' => $DEBUG_ID,
+  'meta_http' => $http ?: 0,
+  'effective_url' => $eff,
+  'time' => $time,
+]);
 
-// 5) дедуп-флаг
-upstash_set('purchase:' . $token, '1', 60*60*24*30);
-log_step('dedup_set', ['key' => 'purchase:' . $token]);
-
-out(200, ['ok' => true, 'debug_id' => $DEBUG_ID, 'meta' => $res]);
+if ($http < 200 || $http >= 300) out($http ?: 500, [
+  'error' => 'meta rejected',
+  'debug_id' => $DEBUG_ID,
+  'meta_http' => $http,
+  'meta_body' => $res,
+  'sent_preview' => substr(json_encode($bodyArr, JSON_UNESCAPED_UNICODE), 0, 500),
+]);
