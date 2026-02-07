@@ -315,9 +315,16 @@ curl_setopt_array($ch, [
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
   CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
 
+  // важно уложиться в лимит edge (15s)
   CURLOPT_CONNECTTIMEOUT => 5,
-  CURLOPT_TIMEOUT => 28,
+  CURLOPT_TIMEOUT => 12,
+
+  // стабильнее на некоторых прокси/edge
   CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+  CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
+
+  // чтобы не было сюрпризов с компрессией
+  CURLOPT_ACCEPT_ENCODING => '',
 ]);
 
 $res  = curl_exec($ch);
