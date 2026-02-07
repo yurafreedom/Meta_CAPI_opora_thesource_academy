@@ -253,9 +253,8 @@ curl_setopt_array($ch, [
   CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
   CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+  CURLOPT_CONNECTTIMEOUT => 5,
   CURLOPT_TIMEOUT => 15,
-  CURLOPT_FOLLOWLOCATION => true,      // ВАЖНО: следуем 301/302
-  CURLOPT_MAXREDIRS => 5,
 ]);
 
 $res = curl_exec($ch);
