@@ -129,6 +129,32 @@ function normalize_lead($raw){
   return null;
 }
 
+function detect_scheme() {
+  $xfp = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '';
+  if ($xfp) {
+    // может быть "https,http"
+    $xfp = strtolower(trim(explode(',', $xfp)[0]));
+    if ($xfp === 'https') return 'https';
+    if ($xfp === 'http')  return 'http';
+  }
+
+  $xfs = strtolower($_SERVER['HTTP_X_FORWARDED_SSL'] ?? '');
+  if ($xfs === 'on') return 'https';
+
+  if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') return 'https';
+  if ((int)($_SERVER['SERVER_PORT'] ?? 0) === 443) return 'https';
+
+  return 'http';
+}
+
+function detect_host() {
+  // иногда прокси передаёт X-Forwarded-Host
+  $xfh = $_SERVER['HTTP_X_FORWARDED_HOST'] ?? '';
+  if ($xfh) return trim(explode(',', $xfh)[0]);
+
+  return $_SERVER['HTTP_HOST'] ?? '';
+}
+
 // ---------------- debug logging ----------------
 $DEBUG_ID = 'p_' . substr(bin2hex(random_bytes(8)), 0, 16);
 
@@ -240,12 +266,8 @@ log_step('payload_built', [
 // 4) meta-capi.php
 $metaUrl = getenv('META_CAPI_URL');
 if (!$metaUrl) {
-  $xfp = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '';
-  $scheme = ($xfp === 'https')
-    ? 'https'
-    : ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http');
-
-  $host = $_SERVER['HTTP_HOST'] ?? '';
+  $scheme = detect_scheme();
+  $host   = detect_host();
   $metaUrl = $scheme . '://' . $host . '/meta-capi.php';
 }
 
