@@ -56,6 +56,8 @@ function upstash_set($key, $value, $ttlSeconds = 60*60*24*30){
   return [$code1, $resp1];
 }
 
+// ---------- helpers ----------
+
 function try_json_decode($x){
   if ($x === null) return null;
   if (is_array($x) || is_object($x)) return $x;
@@ -70,27 +72,58 @@ function try_json_decode($x){
   return null;
 }
 
+// Декодим JSON “в глубину”: когда result = строка, внутри которой ещё JSON строка и т.д.
+function deep_decode($x, $max = 3){
+  $cur = $x;
+  for ($i=0; $i<$max; $i++){
+    $d = try_json_decode($cur);
+    if ($d === null) break;
+
+    // если декодирование вернуло строку, и она похожа на JSON — пробуем дальше
+    if (is_string($d)) {
+      $s = trim($d);
+      if ($s === '' || ($s[0] !== '{' && $s[0] !== '[')) return $d;
+      $cur = $d;
+      continue;
+    }
+
+    return $d;
+  }
+  return is_string($cur) ? $cur : null;
+}
+
 /**
  * Нормализуем "lead" из Upstash:
- * варианты, которые реально встречаются:
+ * встречающиеся варианты:
  * 1) '{"token":"...","ph_sha256":"..."}'
  * 2) '[{"token":"...","ph_sha256":"..."}]'
- * 3) '["{\"token\":\"...\",\"ph_sha256\":\"...\"}"]'   <-- твой случай (двойное кодирование)
- * 4) ["{...}"] (после одного decode)
+ * 3) '["{\"token\":\"...\",\"ph_sha256\":\"...\"}"]'   <-- двойное кодирование
+ * 4) '"[{\"token\":\"...\"}]"' <-- ещё один уровень строкой
  */
 function normalize_lead($raw){
-  $v1 = try_json_decode($raw);
+  $v1 = deep_decode($raw, 3);
+
   if ($v1 === null) return null;
 
+  // Если после deep_decode всё ещё строка — пробуем ещё раз обычным decode
+  if (is_string($v1)) {
+    $v1b = try_json_decode($v1);
+    if ($v1b !== null) $v1 = $v1b;
+  }
+
+  // Массив со строкой JSON в [0]
   if (is_array($v1) && isset($v1[0]) && is_string($v1[0])) {
-    $v2 = try_json_decode($v1[0]);
+    $v2 = deep_decode($v1[0], 2);
     if (is_array($v2)) {
       if (isset($v2[0]) && is_array($v2[0])) return $v2[0];
       return $v2;
     }
   }
 
+  // Массив объектов
   if (is_array($v1) && isset($v1[0]) && is_array($v1[0])) return $v1[0];
+
+  // Обычный объект
   if (is_array($v1)) return $v1;
 
   return null;
@@ -114,6 +147,7 @@ function log_step($step, $data = [], $level = 'info'){
 // ---------------- input (token) ----------------
 $token = trim($_GET['token'] ?? '');
 
+// Поддержка /purchase.php?<uuid> (без token=)
 if ($token === '' && count($_GET) === 1) {
   $keys = array_keys($_GET);
   $maybe = trim($keys[0]);
@@ -127,7 +161,10 @@ if ($token === '') {
   out(400, ['error' => 'bad token', 'debug_id' => $DEBUG_ID, 'hint' => 'use ?token=UUID']);
 }
 
-log_step('input', ['token' => $token]);
+log_step('input', [
+  'token' => $token,
+  'query' => $_SERVER['QUERY_STRING'] ?? ''
+]);
 
 // 1) дедуп покупки
 list($dc, $dr, $dedupRaw) = upstash_get_raw('purchase:' . $token);
@@ -143,50 +180,36 @@ log_step('lead_get_raw', [
   'key' => 'lead:' . $token,
   'http' => $lc,
   'has_result' => $leadRaw !== null,
-  'result_preview' => is_string($leadRaw) ? substr($leadRaw, 0, 200) : $leadRaw
+  'result_preview' => is_string($leadRaw) ? substr($leadRaw, 0, 220) : $leadRaw
 ]);
 
 $lead = normalize_lead($leadRaw);
-
-/**
- * ✅ ФИКС: если lead = [ "{...json...}" ] — разворачиваем и декодим ещё раз
- */
-if (is_array($lead) && isset($lead[0]) && is_string($lead[0])) {
-  $decodedInner = json_decode($lead[0], true);
-  if (json_last_error() === JSON_ERROR_NONE && is_array($decodedInner)) {
-    $lead = $decodedInner;
-  }
-}
-
-// на всякий: если lead = [ {..} ] — берём первый
-if (is_array($lead) && isset($lead[0]) && is_array($lead[0])) {
-  $lead = $lead[0];
-}
-
 log_step('lead_normalized', [
   'ok' => is_array($lead),
   'type' => gettype($lead),
   'keys' => is_array($lead) ? array_keys($lead) : null,
+  'sample' => is_array($lead) ? array_slice($lead, 0, 3, true) : null
 ]);
 
-if (!$lead || !is_array($lead)) {
+if (!$lead) {
   out(404, [
     'error' => 'lead not found',
     'debug_id' => $DEBUG_ID,
-    'upstash' => ['http' => $lc, 'raw_preview' => is_string($leadRaw) ? substr($leadRaw, 0, 200) : $leadRaw]
+    'upstash' => ['http' => $lc, 'raw_preview' => is_string($leadRaw) ? substr($leadRaw, 0, 220) : $leadRaw]
   ]);
 }
 
 // 2.1) ph_sha256
 $ph_sha256 = strtolower(trim($lead['ph_sha256'] ?? ''));
 
+// запасной вариант: lead->lead->ph_sha256
 if ($ph_sha256 === '' && isset($lead['lead']) && is_array($lead['lead'])) {
   $ph_sha256 = strtolower(trim($lead['lead']['ph_sha256'] ?? ''));
 }
 
 if ($ph_sha256 === '') {
   log_step('lead_missing_ph_sha256', ['lead' => $lead], 'error');
-  out(400, ['error' => 'no ph_sha256 in lead', 'debug_id' => $DEBUG_ID, 'lead_keys' => array_keys($lead)]);
+  out(400, ['error' => 'no ph_sha256 in lead', 'debug_id' => $DEBUG_ID]);
 }
 
 log_step('lead_ok', ['ph_sha256_prefix' => substr($ph_sha256, 0, 10) . '...']);
@@ -230,21 +253,26 @@ curl_setopt_array($ch, [
   CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
   CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
-  CURLOPT_TIMEOUT => 12,
+  CURLOPT_TIMEOUT => 15,
+  CURLOPT_FOLLOWLOCATION => true,      // ВАЖНО: следуем 301/302
+  CURLOPT_MAXREDIRS => 5,
 ]);
+
 $res = curl_exec($ch);
 $err = curl_error($ch);
 $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$eff  = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
 curl_close($ch);
 
 log_step('meta_call_end', [
   'http' => $http,
+  'effective_url' => $eff,
   'err' => $err ? $err : null,
-  'resp_preview' => is_string($res) ? substr($res, 0, 300) : $res
+  'resp_preview' => is_string($res) ? substr($res, 0, 400) : $res
 ], ($err || $http < 200 || $http >= 300) ? 'error' : 'info');
 
-if ($err) out(500, ['error' => $err, 'debug_id' => $DEBUG_ID]);
-if ($http < 200 || $http >= 300) out($http ?: 500, ['error' => 'meta failed', 'resp' => $res, 'debug_id' => $DEBUG_ID]);
+if ($err) out(500, ['error' => $err, 'debug_id' => $DEBUG_ID, 'meta_http' => $http, 'effective_url' => $eff]);
+if ($http < 200 || $http >= 300) out($http ?: 500, ['error' => 'meta failed', 'resp' => $res, 'debug_id' => $DEBUG_ID, 'meta_http' => $http, 'effective_url' => $eff]);
 
 // 5) дедуп-флаг
 upstash_set('purchase:' . $token, '1', 60*60*24*30);
