@@ -66,9 +66,13 @@ if (empty($user_in) && $lead) {
   ];
 }
 
+// Нормализуем поля под формат Meta CAPI
+if (!empty($user_in['ph']) && is_string($user_in['ph'])) $user_in['ph'] = [ $user_in['ph'] ];
+if (!empty($user_in['em']) && is_string($user_in['em'])) $user_in['em'] = [ $user_in['em'] ];
+
 $user_data = array_filter([
-  'ph' => $user_in['ph'] ?? null,
-  'em' => $user_in['em'] ?? null,
+  'ph' => isset($user_in['ph']) ? (is_array($user_in['ph']) ? $user_in['ph'] : [$user_in['ph']]) : null,
+  'em' => isset($user_in['em']) ? (is_array($user_in['em']) ? $user_in['em'] : [$user_in['em']]) : null,
   'fbp' => $user_in['fbp'] ?? null,
   'fbc' => $user_in['fbc'] ?? null,
   'external_id' => $user_in['external_id'] ?? null,
@@ -107,18 +111,34 @@ curl_setopt_array($ch, [
 $res  = curl_exec($ch);
 $err  = curl_error($ch);
 $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+$meta_json = null;
+if (is_string($res) && $res !== '') {
+  $meta_json = json_decode($res, true);
+  if (json_last_error() !== JSON_ERROR_NONE) $meta_json = null;
+}
+
 curl_close($ch);
 
 if ($err) j(500, ['error' => 'curl_error', 'message' => $err]);
 
-if ($code < 200 || $code >= 300) {
+if ($err) {
+  j(500, ['error' => 'curl_error', 'message' => $err]);
+}
+
+if ($code < 200 || $code >= 300 || isset($meta_json['error'])) {
   j($code ?: 500, [
     'error' => 'meta rejected',
     'meta_http' => $code,
     'meta_body' => $res,
+    'meta_json' => $meta_json,
     'sent' => $bodyArr
   ]);
 }
 
-http_response_code(200);
-echo $res;
+j(200, [
+  'ok' => true,
+  'meta_http' => $code,
+  'meta_body' => $res,
+  'meta_json' => $meta_json
+]);
