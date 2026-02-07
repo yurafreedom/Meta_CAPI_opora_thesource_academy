@@ -240,7 +240,11 @@ log_step('payload_built', [
 // 4) meta-capi.php
 $metaUrl = getenv('META_CAPI_URL');
 if (!$metaUrl) {
-  $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+  $xfp = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '';
+  $scheme = ($xfp === 'https')
+    ? 'https'
+    : ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http');
+
   $host = $_SERVER['HTTP_HOST'] ?? '';
   $metaUrl = $scheme . '://' . $host . '/meta-capi.php';
 }
@@ -255,6 +259,9 @@ curl_setopt_array($ch, [
   CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
   CURLOPT_CONNECTTIMEOUT => 5,
   CURLOPT_TIMEOUT => 15,
+
+  CURLOPT_FOLLOWLOCATION => true,
+  CURLOPT_MAXREDIRS => 3,
 ]);
 
 $res = curl_exec($ch);
