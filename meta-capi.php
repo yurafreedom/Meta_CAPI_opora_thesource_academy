@@ -5,7 +5,7 @@ header('Content-Type: application/json');
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
 header("Access-Control-Allow-Origin: $origin");
 header("Vary: Origin");
-header("Access-Control-Allow-Methods: POST, OPTIONS");
+header("Access-Control-Allow-Methods: POST, OPTIONS, GET");
 header("Access-Control-Allow-Headers: Content-Type");
 header("Access-Control-Max-Age: 86400");
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
@@ -18,19 +18,33 @@ function compact_filter($v) {
   return true;
 }
 
+// (удобно) если открыл в браузере — покажем, что endpoint жив
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+  j(200, ['ok' => true, 'hint' => 'POST JSON to this endpoint']);
+}
+
 $ACCESS_TOKEN    = getenv('META_CAPI_TOKEN');
 $PIXEL_ID        = getenv('META_PIXEL_ID');
-$TEST_EVENT_CODE = getenv('META_TEST_EVENT_CODE'); // TEST71361
+$TEST_EVENT_CODE = getenv('META_TEST_EVENT_CODE'); // optional
 $API_VERSION     = 'v21.0';
 
 if (!$ACCESS_TOKEN || !$PIXEL_ID) j(500, ['error' => 'Server misconfigured: missing token/pixel']);
 
-$p = json_decode(file_get_contents('php://input'), true);
-if (!is_array($p)) j(400, ['error' => 'bad json']);
+$raw = file_get_contents('php://input');
+if ($raw === false) $raw = '';
+$p = json_decode($raw, true);
+if (!is_array($p)) {
+  j(400, [
+    'error' => 'bad json',
+    'json_error' => json_last_error_msg(),
+    'raw_len' => strlen($raw),
+    'raw_head' => substr($raw, 0, 200)
+  ]);
+}
 
 // поддержка форматов:
 // A) {event_name, event_time?, event_source_url?, user:{...}, custom_data?}
-// B) {lead:{...}, page_url?, token?} -> делаем Purchase по умолчанию
+// B) {lead:{...}, page_url?, token?} -> Purchase по умолчанию
 $lead = is_array($p['lead'] ?? null) ? $p['lead'] : null;
 
 $event_name = $p['event_name'] ?? 'Purchase';
@@ -56,7 +70,12 @@ $user_data = array_filter([
   'external_id' => $user_in['external_id'] ?? null,
 ], 'compact_filter');
 
-if (empty($user_data)) j(400, ['error' => 'missing user_data (need at least ph/em/fbp/fbc/external_id)']);
+if (empty($user_data)) {
+  j(400, [
+    'error' => 'missing user_data (need at least ph/em/fbp/fbc/external_id)',
+    'got' => $user_in
+  ]);
+}
 
 $event = array_filter([
   'event_name' => $event_name,
@@ -77,19 +96,26 @@ curl_setopt_array($ch, [
   CURLOPT_POST => true,
   CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-  CURLOPT_POSTFIELDS => json_encode($bodyArr),
+  CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
+
+  // !!! КЛЮЧЕВОЕ: чтобы не висло и не убивалось Railway на 15с
+  CURLOPT_CONNECTTIMEOUT => 4,
+  CURLOPT_TIMEOUT => 10,
+  CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
 ]);
 
 $res  = curl_exec($ch);
 $err  = curl_error($ch);
 $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$info = curl_getinfo($ch);
 curl_close($ch);
 
-if ($err) j(500, ['error' => $err]);
+if ($err) {
+  j(502, ['error' => 'curl_error', 'detail' => $err, 'curl_info' => $info, 'sent' => $bodyArr]);
+}
 
-// КЛЮЧЕВОЕ: если Meta ответила не 200 — отдаём как ошибку, чтобы ты видел в консоли
 if ($code < 200 || $code >= 300) {
-  j($code, ['error' => 'meta rejected', 'meta_http' => $code, 'meta_body' => $res, 'sent' => $bodyArr]);
+  j($code ?: 502, ['error' => 'meta rejected', 'meta_http' => $code, 'meta_body' => $res, 'sent' => $bodyArr]);
 }
 
 http_response_code(200);
