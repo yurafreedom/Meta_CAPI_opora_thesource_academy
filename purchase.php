@@ -79,26 +79,18 @@ function try_json_decode($x){
  * 4) ["{...}"] (после одного decode)
  */
 function normalize_lead($raw){
-  // raw — это string|null из Upstash result
   $v1 = try_json_decode($raw);
-
-  // если не декодится — значит это не JSON вообще
   if ($v1 === null) return null;
 
-  // если это массив и внутри 1-й элемент строка JSON — декодим ещё раз
   if (is_array($v1) && isset($v1[0]) && is_string($v1[0])) {
     $v2 = try_json_decode($v1[0]);
     if (is_array($v2)) {
-      // если это массив объектов — берём первый
       if (isset($v2[0]) && is_array($v2[0])) return $v2[0];
       return $v2;
     }
   }
 
-  // если это массив объектов — берём первый
   if (is_array($v1) && isset($v1[0]) && is_array($v1[0])) return $v1[0];
-
-  // если это объект-массив — возвращаем как есть
   if (is_array($v1)) return $v1;
 
   return null;
@@ -116,19 +108,15 @@ function log_step($step, $data = [], $level = 'info'){
     'ts_server' => time(),
     'data' => $data
   ];
-  // пишем в Upstash LIST purchase_logs
   upstash_lpush_json('purchase_logs', $row);
 }
 
 // ---------------- input (token) ----------------
-// Нормальный вариант: ?token=...
 $token = trim($_GET['token'] ?? '');
 
-// Поддержка твоей ошибочной формы: /purchase.php?<uuid> (без token=)
 if ($token === '' && count($_GET) === 1) {
   $keys = array_keys($_GET);
   $maybe = trim($keys[0]);
-  // если ключ похож на uuid — принимаем как token
   if (preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i', $maybe)) {
     $token = $maybe;
   }
@@ -159,14 +147,29 @@ log_step('lead_get_raw', [
 ]);
 
 $lead = normalize_lead($leadRaw);
+
+/**
+ * ✅ ФИКС: если lead = [ "{...json...}" ] — разворачиваем и декодим ещё раз
+ */
+if (is_array($lead) && isset($lead[0]) && is_string($lead[0])) {
+  $decodedInner = json_decode($lead[0], true);
+  if (json_last_error() === JSON_ERROR_NONE && is_array($decodedInner)) {
+    $lead = $decodedInner;
+  }
+}
+
+// на всякий: если lead = [ {..} ] — берём первый
+if (is_array($lead) && isset($lead[0]) && is_array($lead[0])) {
+  $lead = $lead[0];
+}
+
 log_step('lead_normalized', [
   'ok' => is_array($lead),
   'type' => gettype($lead),
   'keys' => is_array($lead) ? array_keys($lead) : null,
-  'sample0' => (is_array($lead) && isset($lead[0])) ? (is_string($lead[0]) ? substr($lead[0],0,120) : $lead[0]) : null
 ]);
 
-if (!$lead) {
+if (!$lead || !is_array($lead)) {
   out(404, [
     'error' => 'lead not found',
     'debug_id' => $DEBUG_ID,
@@ -174,22 +177,21 @@ if (!$lead) {
   ]);
 }
 
-// 2.1) ph_sha256 — берём как есть
+// 2.1) ph_sha256
 $ph_sha256 = strtolower(trim($lead['ph_sha256'] ?? ''));
 
-// запасной вариант: если вдруг сохранилось как lead->lead->ph_sha256
 if ($ph_sha256 === '' && isset($lead['lead']) && is_array($lead['lead'])) {
   $ph_sha256 = strtolower(trim($lead['lead']['ph_sha256'] ?? ''));
 }
 
 if ($ph_sha256 === '') {
   log_step('lead_missing_ph_sha256', ['lead' => $lead], 'error');
-  out(400, ['error' => 'no ph_sha256 in lead', 'debug_id' => $DEBUG_ID]);
+  out(400, ['error' => 'no ph_sha256 in lead', 'debug_id' => $DEBUG_ID, 'lead_keys' => array_keys($lead)]);
 }
 
 log_step('lead_ok', ['ph_sha256_prefix' => substr($ph_sha256, 0, 10) . '...']);
 
-// 3) собираем payload
+// 3) payload
 $value = (float)($_GET['value'] ?? 1);
 $currency = (string)($_GET['currency'] ?? 'UAH');
 
@@ -212,7 +214,7 @@ log_step('payload_built', [
   'currency' => $currency
 ]);
 
-// 4) вызываем meta-capi.php
+// 4) meta-capi.php
 $metaUrl = getenv('META_CAPI_URL');
 if (!$metaUrl) {
   $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
@@ -244,7 +246,7 @@ log_step('meta_call_end', [
 if ($err) out(500, ['error' => $err, 'debug_id' => $DEBUG_ID]);
 if ($http < 200 || $http >= 300) out($http ?: 500, ['error' => 'meta failed', 'resp' => $res, 'debug_id' => $DEBUG_ID]);
 
-// 5) ставим дедуп-флаг
+// 5) дедуп-флаг
 upstash_set('purchase:' . $token, '1', 60*60*24*30);
 log_step('dedup_set', ['key' => 'purchase:' . $token]);
 
