@@ -53,7 +53,10 @@ $lead = is_array($p['lead'] ?? null) ? $p['lead'] : null;
 
 $event_name = $p['event_name'] ?? 'Purchase';
 $event_time = !empty($p['event_time']) ? (int)$p['event_time'] : time();
-if ($event_time < 1000000000) $event_time = time();
+$now = time();
+if ($event_time < 1000000000 || $event_time > $now + 600 || $event_time < $now - 7*24*3600) {
+  $event_time = $now;
+}
 
 $user_in = is_array($p['user'] ?? null) ? $p['user'] : [];
 if (empty($user_in) && $lead) {
