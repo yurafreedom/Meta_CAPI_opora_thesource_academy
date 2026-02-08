@@ -343,7 +343,7 @@ log_step('meta_graph', [
   'effective_url' => $eff,
   'resp_preview' => is_string($res) ? substr($res, 0, 500) : $res,
   'sent_preview' => substr(json_encode($bodyArr, JSON_UNESCAPED_UNICODE), 0, 500),
-], (($errno > 0) || $http < 200 || $http >= 300) ? 'error' : 'info');
+], ($errno || $http < 200 || $http >= 300) ? 'error' : 'info');
 
 if ($errno > 0) out(500, [
   'error' => 'curl_errno',
