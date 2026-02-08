@@ -167,7 +167,12 @@ function log_step($step, $data = [], $level = 'info'){
     'ts_server' => time(),
     'data' => $data
   ];
-  upstash_lpush_json('purchase_logs', $row);
+  list($c, $r) = upstash_lpush_json('purchase_logs', $row);
+
+  // если Upstash не принял — допиши это прямо в error_log PHP
+  if (!($c >= 200 && $c < 300)) {
+    error_log("UPSTASH_LPUSH_FAILED debug_id=$DEBUG_ID step=$step http=$c resp=" . substr((string)$r,0,200));
+  }
 }
 
 // ---------------- input (token) ----------------
@@ -278,7 +283,7 @@ if (!$ACCESS_TOKEN || !$PIXEL_ID) {
 // user_data (Meta expects ph/em as arrays)
 $user_data = array_filter([
   'ph' => $ph_sha256 ? [$ph_sha256] : null,
-  'external_id' => $token ? [$token] : null,
+  'external_id' => $token ?: null,
   'client_user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
 ], function($v){
   if ($v === null) return false;
