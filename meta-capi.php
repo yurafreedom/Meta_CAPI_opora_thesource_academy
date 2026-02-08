@@ -135,7 +135,9 @@ if ($code < 200 || $code >= 300 || isset($meta_json['error'])) {
     'meta_http' => $code,
     'meta_body' => $res,
     'meta_json' => $meta_json,
-    'sent' => $bodyArr
+
+    // ВАЖНО: не логируем весь payload
+    'sent_preview' => substr(json_encode($bodyArr, JSON_UNESCAPED_UNICODE), 0, 500)
   ]);
 }
 
