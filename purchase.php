@@ -19,6 +19,10 @@ function upstash_request($path, $method='GET', $jsonBody=null){
     'Content-Type: application/json'
   ]);
 
+  // ✅ чтобы Upstash НЕ мог “повесить” purchase
+  curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+  curl_setopt($ch, CURLOPT_TIMEOUT, 4);
+
   if ($method === 'POST') {
     curl_setopt($ch, CURLOPT_POST, true);
     if ($jsonBody !== null) {
@@ -31,6 +35,19 @@ function upstash_request($path, $method='GET', $jsonBody=null){
   curl_close($ch);
 
   return [$code, $resp];
+}
+
+// best-effort лог: никогда не стопаем purchase из-за логов
+function log_step($step, $data = [], $level = 'info'){
+  global $DEBUG_ID;
+  $row = [
+    'debug_id' => $DEBUG_ID,
+    'level' => $level,
+    'step' => $step,
+    'ts_server' => time(),
+    'data' => $data
+  ];
+  try { upstash_lpush_json('purchase_logs', $row); } catch (\Throwable $e) {}
 }
 
 function upstash_lpush_json($key, $valueArr){

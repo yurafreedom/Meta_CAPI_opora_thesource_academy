@@ -74,11 +74,16 @@ if (!empty($user_in['ph']) && is_string($user_in['ph'])) $user_in['ph'] = [ $use
 if (!empty($user_in['em']) && is_string($user_in['em'])) $user_in['em'] = [ $user_in['em'] ];
 
 $user_data = array_filter([
-  'ph' => isset($user_in['ph']) ? (is_array($user_in['ph']) ? $user_in['ph'] : [$user_in['ph']]) : null,
-  'em' => isset($user_in['em']) ? (is_array($user_in['em']) ? $user_in['em'] : [$user_in['em']]) : null,
+  'ph'  => isset($user_in['ph']) ? (is_array($user_in['ph']) ? $user_in['ph'] : [$user_in['ph']]) : null,
+  'em'  => isset($user_in['em']) ? (is_array($user_in['em']) ? $user_in['em'] : [$user_in['em']]) : null,
   'fbp' => $user_in['fbp'] ?? null,
   'fbc' => $user_in['fbc'] ?? null,
-  'external_id' => $user_in['external_id'] ?? null,
+
+  // ✅ ВАЖНО: Meta требует SHA256
+  'external_id' => !empty($user_in['external_id'])
+    ? hash('sha256', (string)$user_in['external_id'])
+    : null,
+
 ], 'compact_filter');
 
 if (empty($user_data)) {
