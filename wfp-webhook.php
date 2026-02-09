@@ -1,6 +1,15 @@
 <?php
 // wfp-webhook.php
 
+file_put_contents(__DIR__.'/webhook.log',
+  date('c')." METHOD=".$_SERVER['REQUEST_METHOD'].
+  " CT=".($_SERVER['CONTENT_TYPE'] ?? '').
+  " POST=".json_encode($_POST, JSON_UNESCAPED_UNICODE).
+  " RAW=".file_get_contents('php://input').
+  "\n",
+  FILE_APPEND
+);
+
 function envv($k, $default = '') {
   $v = getenv($k);
   return ($v !== false && $v !== '') ? $v : $default;
