@@ -42,18 +42,20 @@ function ok_json($arr = []) {
 
 // 1) читаем вход
 $raw = file_get_contents('php://input');
-$ct = $_SERVER['CONTENT_TYPE'] ?? '';
-
-file_put_contents(__DIR__.'/wfp.log', date('c')." CT=".$ct." RAW=".$raw.PHP_EOL, FILE_APPEND);
+$ct  = $_SERVER['CONTENT_TYPE'] ?? '';
 
 $data = null;
 if (stripos($ct, 'application/json') !== false) {
   $data = json_decode($raw, true);
 } else {
-  // WFP часто шлёт form-data / x-www-form-urlencoded
   $data = $_POST ?: json_decode($raw, true);
 }
 if (!is_array($data)) { http_response_code(400); ok_json(['error' => 'bad payload']); }
+
+// ✅ ЛОГ (временно) — после того как $data уже распарсен
+$log = $data;
+unset($log['cardPan'], $log['card_pan'], $log['merchantSignature'], $log['signature']);
+file_put_contents(__DIR__.'/wfp.log', date('c')." CT=".$ct." ".json_encode($log, JSON_UNESCAPED_UNICODE).PHP_EOL, FILE_APPEND);
 
 // 2) забираем базовые поля
 $order_id = $data['orderReference'] ?? $data['order_reference'] ?? '';
@@ -71,6 +73,7 @@ if ($order_id === '') { http_response_code(400); ok_json(['error' => 'orderRefer
 // просто пришли пример payload из webhook (без карты/персональных).
 //
 $secret = envv('WFP_SECRET');
+if (!$secret) { http_response_code(500); ok_json(['error'=>'WFP secret missing']); }
 $merchantAccount = $data['merchantAccount'] ?? envv('WFP_MERCHANT', '');
 
 $amount   = (string)($data['amount'] ?? '');
@@ -137,12 +140,16 @@ if ($token !== 'missing') {
 $metaEndpoint = envv('META_PURCHASE_ENDPOINT', 'https://metacapioporathesourceacademy-production.up.railway.app/meta_purchase.php');
 
 $payload = [
-  'event_id' => $order_id,
-  'token'    => $token,
-  'amount'   => $amount,
-  'currency' => $currency,
-  'lead'     => $lead,
-  'source'   => 'wfp_webhook',
+  'event_name' => 'Purchase',
+  'event_time' => time(),
+  'event_id'   => $order_id,
+  'token'      => $token,
+  'lead'       => $lead,
+  'event_source_url' => (is_array($lead) ? ($lead['page_url'] ?? null) : null),
+  'custom_data' => [
+    'currency' => $currency,
+    'value'    => (float)$amount,
+  ],
 ];
 
 $ch = curl_init($metaEndpoint);

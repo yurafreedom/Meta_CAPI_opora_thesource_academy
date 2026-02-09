@@ -34,8 +34,47 @@ function upstash_cmd(array $cmd) {
   return $j[0]['result'] ?? null;
 }
 
+function upstash_pipeline(array $cmds) {
+  $url = envv('UPSTASH_REDIS_REST_URL');
+  $token = envv('UPSTASH_REDIS_REST_TOKEN');
+  if (!$url || !$token) { throw new Exception("Upstash env missing"); }
+
+  $ch = curl_init(rtrim($url, '/') . '/pipeline');
+  curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_HTTPHEADER => [
+      'Authorization: Bearer ' . $token,
+      'Content-Type: application/json',
+    ],
+    CURLOPT_POSTFIELDS => json_encode($cmds, JSON_UNESCAPED_UNICODE),
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_TIMEOUT => 8,
+  ]);
+  $res = curl_exec($ch);
+  $err = curl_error($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+
+  if ($res === false) throw new Exception("Upstash curl error: $err");
+  if ($code < 200 || $code >= 300) throw new Exception("Upstash HTTP $code: $res");
+
+  return json_decode($res, true);
+  $decoded = json_decode($res, true);
+  if (!is_array($decoded)) throw new Exception("Upstash bad JSON: $res");
+  return $decoded;
+}
+
+$r = upstash_pipeline([
+  ["SET", $k, json_encode($payload, JSON_UNESCAPED_UNICODE)],
+  ["EXPIRE", $k, 60 * 60 * 24 * 30],
+]);
+if (!is_array($r) || ($r[0]['result'] ?? null) !== 'OK') {
+  throw new Exception("Upstash SET failed: " . json_encode($r, JSON_UNESCAPED_UNICODE));
+}
+
 $merchantAccount   = envv('WFP_MERCHANT', 'www_thesource_academy');
 $merchantSecretKey = envv('WFP_SECRET');
+if (!$merchantSecretKey) { http_response_code(500); exit('WFP secret missing'); }
 
 function fmt_money($x) { return number_format((float)$x, 2, '.', ''); }
 
@@ -52,6 +91,9 @@ $order_id   = 'ord_' . bin2hex(random_bytes(8));
 $orderDate  = time();
 
 $siteDomain = envv('SITE_DOMAIN', 'opora.thesource.academy');
+$siteDomain = preg_replace('~^https?://~', '', $siteDomain);
+$siteDomain = rtrim($siteDomain, '/');
+
 $returnBase = rtrim(envv('RETURN_URL', 'https://opora.thesource.academy/thanks'), '/');
 $webhookUrl = envv('WEBHOOK_URL', 'https://metacapioporathesourceacademy-production.up.railway.app/wfp-webhook.php');
 
@@ -69,8 +111,10 @@ $payload = [
 ];
 
 $k = "wfp:order:$order_id";
-upstash_cmd(["SET", $k, json_encode($payload, JSON_UNESCAPED_UNICODE)]);
-upstash_cmd(["EXPIRE", $k, 60 * 60 * 24 * 30]);
+upstash_pipeline([
+  ["SET", $k, json_encode($payload, JSON_UNESCAPED_UNICODE)],
+  ["EXPIRE", $k, 60 * 60 * 24 * 30],
+]);
 
 // 2) WFP fields
 $data = [
@@ -83,7 +127,7 @@ $data = [
   'productName'         => $productName,
   'productCount'        => $productCount,
   'productPrice'        => $productPrice,
-  'returnUrl'           => $returnBase . '?order_id=' . urlencode($order_id) . '&token=' . urlencode($token),
+  'returnUrl'           => $returnBase . '?order_id=' . urlencode($order_id),
   'serviceUrl'          => $webhookUrl,
 ];
 

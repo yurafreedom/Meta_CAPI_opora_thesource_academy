@@ -103,6 +103,7 @@ if (empty($user_data)) {
 
 $event = array_filter([
   'event_name' => $event_name,
+  'event_id' => $p['event_id'] ?? null,
   'event_time' => $event_time,
   'action_source' => 'website',
   'event_source_url' => $p['event_source_url'] ?? ($p['page_url'] ?? null) ?? ($lead['page_url'] ?? null),

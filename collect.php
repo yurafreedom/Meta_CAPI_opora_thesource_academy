@@ -57,6 +57,11 @@ if ($ph === '' || strlen($ph) !== 64) {
 $record = [
   'token' => $token,
   'ph_sha256' => $ph,
+
+  // 🔥 ВАЖНО ДЛЯ МЕТА
+  'fbp' => (string)($_GET['fbp'] ?? ''),
+  'fbc' => (string)($_GET['fbc'] ?? ''),
+
   'ts' => (int)($_GET['ts'] ?? (int)(microtime(true)*1000)),
   'ts_server' => time(),
   'reason' => (string)($_GET['r'] ?? ''),
@@ -74,10 +79,6 @@ $record = [
 
 $key = "lead:$token";
 
-/**
- * SET lead:<token> JSON EX 30d
- * overwrite допустим — collect может приходить несколько раз
- */
 upstash_cmd([
   "SET",
   $key,
