@@ -133,7 +133,7 @@ $url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_toke
 log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
   " event_name=" . ($event['event_name'] ?? 'NULL') .
   " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
-  " url=https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events");
+  " url={$url}");
 
 $ch = curl_init($url);
 curl_setopt_array($ch, [
@@ -154,9 +154,8 @@ $timed_out = ($code === 0) && $err && stripos($err, 'timed out') !== false;
 
 if ($timed_out) {
   log_meta_graph("RETRY after timeout...");
-
   curl_close($ch);
-  usleep(200000); // 200ms
+  usleep(200000);
 
   $ch = curl_init($url);
   curl_setopt_array($ch, [
@@ -178,33 +177,20 @@ log_meta_graph("RESP http={$code} err=" . ($err ?: '-') . " t={$tt} body=" . sub
 
 curl_close($ch);
 
-// ✅ LOG what we sent + what Meta returned (safe preview)
-file_put_contents(
-  __DIR__.'/meta_graph.log',
-  date('c')
-  ." http=".$code
-  ." err=".$err
-  ." resp=".substr((string)$res, 0, 2000)
-  ." sent=".substr(json_encode($bodyArr, JSON_UNESCAPED_UNICODE), 0, 1200)
-  ."\n",
-  FILE_APPEND
-);
+$meta_json = null;
+if (is_string($res) && $res !== '') {
+  $meta_json = json_decode($res, true);
+  if (json_last_error() !== JSON_ERROR_NONE) $meta_json = null;
+}
 
 if ($err) j(500, ['error' => 'curl_error', 'message' => $err]);
 
-if ($err) {
-  j(500, ['error' => 'curl_error', 'message' => $err]);
-}
-
-if ($code < 200 || $code >= 300 || isset($meta_json['error'])) {
+if ($code < 200 || $code >= 300 || (is_array($meta_json) && isset($meta_json['error']))) {
   j($code ?: 500, [
     'error' => 'meta rejected',
     'meta_http' => $code,
     'meta_body' => $res,
     'meta_json' => $meta_json,
-
-    // ВАЖНО: не логируем весь payload
-    'sent_preview' => substr(json_encode($bodyArr, JSON_UNESCAPED_UNICODE), 0, 500)
   ]);
 }
 
