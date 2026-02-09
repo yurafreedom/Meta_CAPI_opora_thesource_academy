@@ -156,6 +156,11 @@ file_put_contents(__DIR__.'/sign.txt', $signature_string . PHP_EOL, FILE_APPEND)
 $data['merchantSignature'] = hash_hmac('md5', $signature_string, $merchantSecretKey);
 
 file_put_contents(__DIR__.'/debug_amount.txt',
+  "merchantAccount=".$data['merchantAccount']."\n".
+  "merchantDomainName=".$data['merchantDomainName']."\n".
+  "orderReference=".$data['orderReference']."\n".
+  "orderDate=".$data['orderDate']."\n".
+  "currency=".$data['currency']."\n".
   "amount=".$data['amount']."\n".
   "productPrice0=".$productPrice[0]."\n".
   "signature_string=".$signature_string."\n".
