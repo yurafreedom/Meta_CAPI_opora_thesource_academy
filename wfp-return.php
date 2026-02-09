@@ -1,17 +1,33 @@
 <?php
-// wfp-return.php — принимает возврат от WFP (часто POST) и редиректит на сайт
+// wfp-return.php
 
-$order_id = $_GET['order_id'] ?? '';
-// WFP иногда шлёт orderReference / order_reference в POST
-if ($order_id === '' && !empty($_POST)) {
-  $order_id = $_POST['orderReference'] ?? ($_POST['order_reference'] ?? '');
+@file_put_contents(
+  __DIR__ . '/return.log',
+  date('c') .
+  " METHOD=" . ($_SERVER['REQUEST_METHOD'] ?? '') .
+  " POST=" . json_encode($_POST, JSON_UNESCAPED_UNICODE) .
+  " GET="  . json_encode($_GET,  JSON_UNESCAPED_UNICODE) .
+  "\n",
+  FILE_APPEND
+);
+
+function envv($k, $default = '') {
+  $v = getenv($k);
+  return ($v !== false && $v !== '') ? $v : $default;
 }
 
+$order_id = trim((string)($_GET['order_id'] ?? ''));
 if ($order_id === '') {
-  // на всякий — пусть ведёт на thanks без id, но без 405
-  header("Location: https://opora.thesource.academy/thanks", true, 302);
+  $order_id = trim((string)($_POST['orderReference'] ?? $_POST['order_reference'] ?? ''));
+}
+
+if ($order_id === '' || strlen($order_id) > 80) {
+  http_response_code(400);
+  header('Content-Type: text/plain; charset=utf-8');
+  echo "missing order_id";
   exit;
 }
 
-header("Location: https://opora.thesource.academy/thanks?order_id=" . urlencode($order_id), true, 302);
+$thanks = rtrim(envv('THANKS_URL', 'https://opora.thesource.academy/thanks'), '/');
+header('Location: ' . $thanks . '?order_id=' . urlencode($order_id), true, 302);
 exit;
