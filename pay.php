@@ -58,18 +58,9 @@ function upstash_pipeline(array $cmds) {
   if ($res === false) throw new Exception("Upstash curl error: $err");
   if ($code < 200 || $code >= 300) throw new Exception("Upstash HTTP $code: $res");
 
-  return json_decode($res, true);
   $decoded = json_decode($res, true);
   if (!is_array($decoded)) throw new Exception("Upstash bad JSON: $res");
   return $decoded;
-}
-
-$r = upstash_pipeline([
-  ["SET", $k, json_encode($payload, JSON_UNESCAPED_UNICODE)],
-  ["EXPIRE", $k, 60 * 60 * 24 * 30],
-]);
-if (!is_array($r) || ($r[0]['result'] ?? null) !== 'OK') {
-  throw new Exception("Upstash SET failed: " . json_encode($r, JSON_UNESCAPED_UNICODE));
 }
 
 $merchantAccount   = envv('WFP_MERCHANT', 'www_thesource_academy');
@@ -80,8 +71,6 @@ function fmt_money($x) { return number_format((float)$x, 2, '.', ''); }
 
 $token = trim($_GET['token'] ?? $_POST['token'] ?? '');
 if ($token === '' || strlen($token) > 80) { http_response_code(400); exit('Token missing/bad'); }
-
-function fmt_money($x) { return number_format((float)$x, 2, '.', ''); }
 
 $amount_raw = envv('PRICE_UAH', '1');               // тест = 1 грн через ENV
 $amount     = (float)$amount_raw;
@@ -144,16 +133,28 @@ $signature_string = implode(';', [
   $data['merchantDomainName'],
   $data['orderReference'],
   $data['orderDate'],
-  $data['amount'],
+  $data['amount'],          // "1.00"
   $data['currency'],
   implode(';', $productName),
   implode(';', $productCount),
-  implode(';', $productPrice),
+  implode(';', $productPrice), // "1.00"
 ]);
 
 file_put_contents(__DIR__.'/sign.txt', $signature_string . PHP_EOL, FILE_APPEND);
 
 $data['merchantSignature'] = hash_hmac('md5', $signature_string, $merchantSecretKey);
+
+// ===== DEBUG WFP SIGNATURE =====
+if (isset($_GET['dbg'])) {
+  header('Content-Type: text/plain; charset=utf-8');
+
+  echo "signature_string:\n" . $signature_string . "\n\n";
+  echo "signature:\n" . $data['merchantSignature'] . "\n\n";
+  echo "amount=" . $data['amount'] . "\n";
+  echo "productPrice0=" . $productPrice[0] . "\n";
+
+  exit;
+}
 
 file_put_contents(__DIR__.'/debug_amount.txt',
   "merchantAccount=".$data['merchantAccount']."\n".
