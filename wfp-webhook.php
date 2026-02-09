@@ -216,58 +216,129 @@ if ($token !== 'missing') {
   $lead = $leadJson ? json_decode($leadJson, true) : null;
 }
 
-// 8) Отправляем Meta Purchase (тут вызываешь свой meta-capi.php / или HTTP на Railway endpoint)
-// Главное: event_id = order_id
-// Ниже пример: дергаем ваш Railway endpoint /meta_purchase.php (поставь свой путь)
-$metaEndpoint = envv('META_PURCHASE_ENDPOINT', 'https://metacapioporathesourceacademy-production.up.railway.app/meta_purchase.php');
-
-$payload = [
-  'event_name' => 'Purchase',
-  'event_time' => time(),
-  'event_id'   => $order_id,
-  'token'      => $token,
-  'lead'       => $lead,
-  'event_source_url' => (is_array($lead) ? ($lead['page_url'] ?? null) : null),
-  'custom_data' => [
-    'currency' => $currency,
-    'value'    => (float)$amount,
-  ],
-];
-
-$ch = curl_init($metaEndpoint);
-curl_setopt_array($ch, [
-  CURLOPT_POST => true,
-  CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-  CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
-  CURLOPT_RETURNTRANSFER => true,
-
-  CURLOPT_CONNECTTIMEOUT => 5,
-  CURLOPT_TIMEOUT => 25,          // было 10
-]);
-$res = curl_exec($ch);
-$err  = curl_error($ch);
-$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
-
-file_put_contents(
-  __DIR__.'/meta_response.log',
-  date('c')." order={$order_id} http={$code} err={$err} body=".substr((string)$res, 0, 2000)."\n",
-  FILE_APPEND
-);
-
-if ($res === false) {
-  upstash_cmd(["DEL", $dedupeKey]); // важно, чтобы WFP retry мог добить
-  http_response_code(502);
-  ok_json(['error' => 'meta curl error', 'message' => $err]);
+// 8) Отправляем Purchase напрямую в Meta Graph API (без self-call на /meta_purchase.php)
+function log_meta_graph($msg) {
+  @file_put_contents(__DIR__ . '/meta_graph.log', date('c') . " " . $msg . "\n", FILE_APPEND);
 }
 
-if ($code < 200 || $code >= 300) {
-  // ВАЖНО: если Meta упало — ты уже поставил dedupeKey.
-  // В проде лучше: при фейле удалить dedupeKey, чтобы WFP retry ещё раз сработал.
-  // Я обычно делаю так:
+$ACCESS_TOKEN    = envv('META_CAPI_TOKEN');
+$PIXEL_ID        = envv('META_PIXEL_ID');
+$TEST_EVENT_CODE = envv('META_TEST_EVENT_CODE'); // если задан — будет тестовый ивент
+$API_VERSION     = envv('META_API_VERSION', 'v21.0');
+
+if (!$ACCESS_TOKEN || !$PIXEL_ID) {
+  upstash_cmd(["DEL", $dedupeKey]);
+  http_response_code(500);
+  ok_json([
+    'error' => 'meta env missing',
+    'has_token' => (bool)$ACCESS_TOKEN,
+    'has_pixel' => (bool)$PIXEL_ID,
+  ]);
+}
+
+// user_data: минимум external_id (sha256) + по возможности fbp/fbc + ip/ua
+$external_id_sha = ($token && $token !== 'missing')
+  ? hash('sha256', $token)
+  : hash('sha256', $order_id);
+
+$user_data = array_filter([
+  'external_id' => [ $external_id_sha ],
+  'fbp' => (is_array($lead) ? ($lead['fbp'] ?? null) : null),
+  'fbc' => (is_array($lead) ? ($lead['fbc'] ?? null) : null),
+  'client_ip_address' => (is_array($lead) ? ($lead['ip'] ?? null) : null),
+  'client_user_agent' => (is_array($lead) ? ($lead['ua'] ?? null) : null),
+], function($v){
+  if ($v === null) return false;
+  if (is_string($v) && trim($v) === '') return false;
+  if (is_array($v) && empty($v)) return false;
+  return true;
+});
+
+$event = array_filter([
+  'event_name' => 'Purchase',
+  'event_time' => time(),
+  'event_id'   => $order_id, // дедуп на стороне Meta
+  'action_source' => 'website',
+  'event_source_url' => (is_array($lead) ? ($lead['page_url'] ?? null) : null),
+  'user_data' => $user_data,
+  'custom_data' => [
+    'currency' => $currency,
+    'value' => (float)$amount,
+  ],
+], function($v){
+  if ($v === null) return false;
+  if (is_string($v) && trim($v) === '') return false;
+  if (is_array($v) && empty($v)) return false;
+  return true;
+});
+
+$bodyArr = ['data' => [$event]];
+if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
+
+$url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
+$safeUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
+
+$did_retry = 0;
+
+log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
+  " event_name=" . ($event['event_name'] ?? 'NULL') .
+  " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
+  " url={$safeUrl}");
+
+$ch = curl_init($url);
+curl_setopt_array($ch, [
+  CURLOPT_POST => true,
+  CURLOPT_RETURNTRANSFER => true,
+  CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+  CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
+
+  // чтобы не зависало и не превращалось в 499/502
+  CURLOPT_CONNECTTIMEOUT => 3,
+  CURLOPT_TIMEOUT => 8,
+]);
+
+$res = curl_exec($ch);
+$err = curl_error($ch);
+$errno = curl_errno($ch);
+$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$tt = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+
+$timed_out = ($errno === 28) || (($code === 0) && $err && stripos($err, 'timed out') !== false);
+
+if ($timed_out) {
+  $did_retry = 1;
+  log_meta_graph("RETRY after timeout...");
+
+  curl_close($ch);
+  usleep(200000); // 200ms
+
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+    CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
+    CURLOPT_CONNECTTIMEOUT => 3,
+    CURLOPT_TIMEOUT => 8,
+  ]);
+
+  $res = curl_exec($ch);
+  $err = curl_error($ch);
+  $errno = curl_errno($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  $tt = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+}
+
+log_meta_graph("RESP http={$code} errno={$errno} err=" . ($err ?: '-') .
+  " t={$tt} retry={$did_retry} body=" . substr((string)$res, 0, 800));
+
+curl_close($ch);
+
+// если Meta не принял — удаляем dedupeKey, чтобы WFP мог повторить вебхук
+if ($err || $code < 200 || $code >= 300) {
   upstash_cmd(["DEL", $dedupeKey]);
   http_response_code(502);
-  ok_json(['error' => 'meta failed', 'http' => $code, 'body' => $res]);
+  ok_json(['error' => 'meta failed', 'http' => $code, 'errno' => $errno, 'err' => $err, 'body' => substr((string)$res, 0, 800)]);
 }
 
 ok_json(['ok' => true]);
