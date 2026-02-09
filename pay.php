@@ -90,7 +90,8 @@ $siteDomain = envv('SITE_DOMAIN', 'opora.thesource.academy');
 $siteDomain = preg_replace('~^https?://~', '', $siteDomain);
 $siteDomain = rtrim($siteDomain, '/');
 
-$returnBase = rtrim(envv('RETURN_URL', 'https://opora.thesource.academy/thanks'), '/');
+$returnBase = rtrim(envv('RETURN_URL', 'https://metacapioporathesourceacademy-production.up.railway.app/wfp-return.php'), '/');
+
 $webhookUrl = envv('WEBHOOK_URL', 'https://metacapioporathesourceacademy-production.up.railway.app/wfp-webhook.php');
 
 $productName  = ['Opora course'];
@@ -123,6 +124,7 @@ $data = [
   'productName'         => $productName,
   'productCount'        => $productCount,
   'productPrice'        => $productPrice,
+
   'returnUrl'           => $returnBase . '?order_id=' . urlencode($order_id),
   'serviceUrl'          => $webhookUrl,
 ];
