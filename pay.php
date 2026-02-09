@@ -81,10 +81,17 @@ function fmt_money($x) { return number_format((float)$x, 2, '.', ''); }
 $token = trim($_GET['token'] ?? $_POST['token'] ?? '');
 if ($token === '' || strlen($token) > 80) { http_response_code(400); exit('Token missing/bad'); }
 
-$amount      = (float) envv('PRICE_UAH', '290');
-if ($amount < 1 || $amount > 100000) { http_response_code(400); exit('Bad amount'); }
+function fmt_money($x) { return number_format((float)$x, 2, '.', ''); }
 
-$amount_str  = fmt_money($amount);
+$amount_raw = envv('PRICE_UAH', '1');               // тест = 1 грн через ENV
+$amount     = (float)$amount_raw;
+
+if ($amount < 1 || $amount > 100000) {
+  http_response_code(400);
+  exit('Bad amount');
+}
+
+$amount_str = fmt_money($amount);                  // "1.00"
 $currency    = envv('CURRENCY', 'UAH');
 
 $order_id   = 'ord_' . bin2hex(random_bytes(8));
@@ -144,7 +151,17 @@ $signature_string = implode(';', [
   implode(';', $productPrice),
 ]);
 
+file_put_contents(__DIR__.'/sign.txt', $signature_string . PHP_EOL, FILE_APPEND);
+
 $data['merchantSignature'] = hash_hmac('md5', $signature_string, $merchantSecretKey);
+
+file_put_contents(__DIR__.'/debug_amount.txt',
+  "amount=".$data['amount']."\n".
+  "productPrice0=".$productPrice[0]."\n".
+  "signature_string=".$signature_string."\n".
+  "signature=".$data['merchantSignature']."\n\n",
+  FILE_APPEND
+);
 
 // 3) отправляем на WFP
 $wfpDomain = 'https://secure.wayforpay.com/pay';
