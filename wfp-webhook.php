@@ -1,12 +1,17 @@
 <?php
 // wfp-webhook.php
 
-file_put_contents(__DIR__.'/webhook.log',
-  date('c')." METHOD=".$_SERVER['REQUEST_METHOD'].
-  " CT=".($_SERVER['CONTENT_TYPE'] ?? '').
-  " POST=".json_encode($_POST, JSON_UNESCAPED_UNICODE).
-  " RAW=".file_get_contents('php://input').
-  "\n",
+$raw = file_get_contents('php://input') ?: '';
+$ct  = $_SERVER['CONTENT_TYPE'] ?? '';
+
+file_put_contents(
+  __DIR__.'/webhook.log',
+  date('c')
+  ." METHOD=".$_SERVER['REQUEST_METHOD']
+  ." CT=".$ct
+  ." POST=".json_encode($_POST, JSON_UNESCAPED_UNICODE)
+  ." RAW=".substr($raw, 0, 5000)
+  ."\n",
   FILE_APPEND
 );
 
@@ -31,8 +36,9 @@ function upstash_cmd(array $cmd) {
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_TIMEOUT => 8,
   ]);
-  $res = curl_exec($ch);
-  $err = curl_error($ch);
+
+  $res  = curl_exec($ch);
+  $err  = curl_error($ch);
   $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
   curl_close($ch);
 
@@ -50,15 +56,13 @@ function ok_json($arr = []) {
 }
 
 // 1) читаем вход
-$raw = file_get_contents('php://input');
-$ct  = $_SERVER['CONTENT_TYPE'] ?? '';
-
 $data = null;
 if (stripos($ct, 'application/json') !== false) {
   $data = json_decode($raw, true);
 } else {
   $data = $_POST ?: json_decode($raw, true);
 }
+
 if (!is_array($data)) { http_response_code(400); ok_json(['error' => 'bad payload']); }
 
 // ✅ ЛОГ (временно) — после того как $data уже распарсен
@@ -172,6 +176,22 @@ curl_setopt_array($ch, [
 $res = curl_exec($ch);
 $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
+
+file_put_contents(
+  __DIR__.'/meta_response.log',
+  date('c')
+  ." order=".$order_id
+  ." http=".$code
+  ." body=".substr((string)$res, 0, 2000)
+  ."\n",
+  FILE_APPEND
+);
+
+if ($res === false) {
+  upstash_cmd(["DEL", $dedupeKey]);
+  http_response_code(502);
+  ok_json(['error' => 'meta curl error', 'message' => $err]);
+}
 
 if ($code < 200 || $code >= 300) {
   // ВАЖНО: если Meta упало — ты уже поставил dedupeKey.

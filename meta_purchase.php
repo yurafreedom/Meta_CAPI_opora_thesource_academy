@@ -19,7 +19,7 @@ function compact_filter($v) {
 }
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
-  j(405, ['error' => 'method not allowed', 'hint' => 'POST JSON to /meta-capi.php']);
+  j(405, ['error' => 'method not allowed', 'hint' => 'POST JSON to /meta_purchase.php']);
 }
 
 $ACCESS_TOKEN    = getenv('META_CAPI_TOKEN');
@@ -94,7 +94,8 @@ $user_data = array_filter([
   'external_id' => $external_id_sha ? [ $external_id_sha ] : null,
 
   // (опционально) юзер-агент, норм
-  'client_user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+  'client_user_agent' => $lead['ua'] ?? null,
+  'client_ip_address' => $lead['ip'] ?? null,
 ], 'compact_filter');
 
 if (empty($user_data)) {
@@ -139,6 +140,18 @@ if (is_string($res) && $res !== '') {
 }
 
 curl_close($ch);
+
+// ✅ LOG what we sent + what Meta returned (safe preview)
+file_put_contents(
+  __DIR__.'/meta_graph.log',
+  date('c')
+  ." http=".$code
+  ." err=".$err
+  ." resp=".substr((string)$res, 0, 2000)
+  ." sent=".substr(json_encode($bodyArr, JSON_UNESCAPED_UNICODE), 0, 1200)
+  ."\n",
+  FILE_APPEND
+);
 
 if ($err) j(500, ['error' => 'curl_error', 'message' => $err]);
 
