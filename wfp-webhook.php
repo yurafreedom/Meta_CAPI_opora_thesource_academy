@@ -55,42 +55,68 @@ function ok_json($arr = []) {
   exit;
 }
 
-// 1) читаем вход (устойчивый парсер)
+// 1) читаем вход
 $data = null;
 
-// сначала пробуем JSON из RAW (самое надёжное)
+/**
+ * A. сначала пробуем JSON из RAW
+ */
 if ($raw !== '') {
   $j = json_decode($raw, true);
-  if (is_array($j)) $data = $j;
+  if (is_array($j)) {
+    $data = $j;
+  }
 }
 
-// если JSON не распарсился — пробуем обычный $_POST
-if (!is_array($data) && !empty($_POST)) {
+/**
+ * B. кейс WayForPay:
+ * application/x-www-form-urlencoded
+ * где ВЕСЬ JSON лежит в имени единственного поля
+ */
+if (!is_array($data) && !empty($_POST) && count($_POST) === 1) {
+  $k = array_key_first($_POST);
+  $v = $_POST[$k];
 
-  // кейс “один ключ = весь JSON, значение пустое”
-  if (count($_POST) === 1) {
-    $k = array_key_first($_POST);
-    $v = $_POST[$k];
-
-    // защита от пустой строки ключа
-    if (is_string($k) && $v === '' && $k !== '' && ($k[0] === '{' || $k[0] === '[')) {
-      $j2 = json_decode($k, true);
-      if (is_array($j2)) $data = $j2;
+  if (
+    is_string($k) &&
+    $v === '' &&
+    $k !== '' &&
+    ($k[0] === '{' || $k[0] === '[')
+  ) {
+    $j2 = json_decode($k, true);
+    if (is_array($j2)) {
+      $data = $j2;
     }
   }
-
-  // обычный form post
-  if (!is_array($data)) $data = $_POST;
 }
 
-// если и так не получилось — пробуем разобрать как querystring
+/**
+ * C. обычный form POST
+ */
+if (!is_array($data) && !empty($_POST)) {
+  $data = $_POST;
+}
+
+/**
+ * D. крайний fallback — parse_str из RAW
+ */
 if (!is_array($data) && $raw !== '') {
   $tmp = [];
   parse_str($raw, $tmp);
-  if (!empty($tmp)) $data = $tmp;
+  if (!empty($tmp)) {
+    $data = $tmp;
+  }
 }
 
-if (!is_array($data)) { http_response_code(400); ok_json(['error' => 'bad payload']); }
+if (!is_array($data)) {
+  http_response_code(400);
+  ok_json(['error' => 'bad payload']);
+}
+
+file_put_contents(__DIR__.'/parse_check.log',
+  date('c')." keys=".implode(',', array_keys($data))." orderReference=".($data['orderReference'] ?? 'NULL')."\n",
+  FILE_APPEND
+);
 
 // ✅ ЛОГ (временно) — после того как $data уже распарсен
 $log = $data;
