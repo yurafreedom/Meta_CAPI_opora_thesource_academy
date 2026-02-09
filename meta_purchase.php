@@ -11,10 +11,14 @@ header("Vary: Origin");
 header("Access-Control-Allow-Methods: POST, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type");
 header("Access-Control-Max-Age: 86400");
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { http_response_code(204); exit; }
 // --- /CORS ---
 
-function j($code, $arr) { http_response_code($code); echo json_encode($arr, JSON_UNESCAPED_UNICODE); exit; }
+function j($code, $arr) {
+  http_response_code($code);
+  echo json_encode($arr, JSON_UNESCAPED_UNICODE);
+  exit;
+}
 
 function compact_filter($v) {
   if ($v === null) return false;
@@ -82,7 +86,7 @@ if (empty($user_in) && $lead) {
   ];
 }
 
-// вытащим токен (как источник external_id)
+// токен как источник external_id
 $token_raw =
   (is_array($lead) ? ($lead['token'] ?? null) : null)
   ?? ($p['token'] ?? null)
@@ -93,7 +97,7 @@ $token_raw = is_string($token_raw) ? trim($token_raw) : null;
 // external_id должен быть sha256
 $external_id_sha = $token_raw ? hash('sha256', $token_raw) : null;
 
-// Нормализуем поля под формат Meta CAPI
+// нормализуем массивы
 if (!empty($user_in['ph']) && is_string($user_in['ph'])) $user_in['ph'] = [ $user_in['ph'] ];
 if (!empty($user_in['em']) && is_string($user_in['em'])) $user_in['em'] = [ $user_in['em'] ];
 
@@ -102,11 +106,7 @@ $user_data = array_filter([
   'em' => isset($user_in['em']) ? (is_array($user_in['em']) ? $user_in['em'] : [$user_in['em']]) : null,
   'fbp' => $user_in['fbp'] ?? null,
   'fbc' => $user_in['fbc'] ?? null,
-
-  // ✅ external_id: sha256, и как массив
   'external_id' => $external_id_sha ? [ $external_id_sha ] : null,
-
-  // (опционально) юзер-агент, норм
   'client_user_agent' => $lead['ua'] ?? null,
   'client_ip_address' => $lead['ip'] ?? null,
 ], 'compact_filter');
@@ -128,62 +128,78 @@ $event = array_filter([
 $bodyArr = ['data' => [$event]];
 if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
 
+// URL с токеном — только для запроса
 $url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
+
+// safeUrl — только для логов
+$safeUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
 
 log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
   " event_name=" . ($event['event_name'] ?? 'NULL') .
   " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
-  " url={$url}");
+  " url={$safeUrl}");
+
+$did_retry = 0;
+$t0 = microtime(true);
 
 $ch = curl_init($url);
 curl_setopt_array($ch, [
   CURLOPT_POST => true,
   CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-  CURLOPT_POSTFIELDS => json_encode($bodyArr),
+  CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
   CURLOPT_CONNECTTIMEOUT => 3,
   CURLOPT_TIMEOUT => 12,
 ]);
 
-$res  = curl_exec($ch);
-$err  = curl_error($ch);
-$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$tt   = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+$res   = curl_exec($ch);
+$err   = curl_error($ch);
+$errno = curl_errno($ch);
+$code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
-$timed_out = ($code === 0) && $err && stripos($err, 'timed out') !== false;
+$timed_out = ($errno === 28); // CURLE_OPERATION_TIMEDOUT
 
 if ($timed_out) {
-  log_meta_graph("RETRY after timeout...");
+  $did_retry = 1;
+  log_meta_graph("RETRY after timeout errno=28 ...");
+
   curl_close($ch);
-  usleep(200000);
+  usleep(200000); // 200ms
 
   $ch = curl_init($url);
   curl_setopt_array($ch, [
     CURLOPT_POST => true,
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-    CURLOPT_POSTFIELDS => json_encode($bodyArr),
+    CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
     CURLOPT_CONNECTTIMEOUT => 3,
     CURLOPT_TIMEOUT => 8,
   ]);
 
-  $res  = curl_exec($ch);
-  $err  = curl_error($ch);
-  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  $tt   = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+  $res   = curl_exec($ch);
+  $err   = curl_error($ch);
+  $errno = curl_errno($ch);
+  $code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 }
 
-log_meta_graph("RESP http={$code} err=" . ($err ?: '-') . " t={$tt} body=" . substr((string)$res, 0, 1500));
+$tt = microtime(true) - $t0;
+
+log_meta_graph("RESP http={$code} errno={$errno} err=" . ($err ?: '-') .
+  " t=" . sprintf('%.3f', $tt) .
+  " retry={$did_retry} body=" . substr((string)$res, 0, 1500));
 
 curl_close($ch);
 
+// meta_json всегда определён
 $meta_json = null;
 if (is_string($res) && $res !== '') {
-  $meta_json = json_decode($res, true);
-  if (json_last_error() !== JSON_ERROR_NONE) $meta_json = null;
+  $tmp = json_decode($res, true);
+  if (json_last_error() === JSON_ERROR_NONE && is_array($tmp)) $meta_json = $tmp;
 }
 
-if ($err) j(500, ['error' => 'curl_error', 'message' => $err]);
+if ($err) {
+  j(500, ['error' => 'curl_error', 'errno' => $errno, 'message' => $err]);
+}
 
 if ($code < 200 || $code >= 300 || (is_array($meta_json) && isset($meta_json['error']))) {
   j($code ?: 500, [
