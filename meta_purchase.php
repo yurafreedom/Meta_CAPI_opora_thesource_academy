@@ -13,19 +13,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
 
 function j($code, $arr) { http_response_code($code); echo json_encode($arr, JSON_UNESCAPED_UNICODE); exit; }
 
-function log_meta_graph($line) {
-  @file_put_contents(__DIR__ . '/meta_graph.log', date('c') . ' ' . $line . "\n", FILE_APPEND);
-}
-
 function compact_filter($v) {
   if ($v === null) return false;
   if (is_string($v) && trim($v) === '') return false;
   return true;
 }
 
-function log_meta_graph($msg) {
-  $line = date('c') . " " . $msg . "\n";
-  @file_put_contents(__DIR__ . '/meta_graph.log', $line, FILE_APPEND);
+if (!function_exists('log_meta_graph')) {
+  function log_meta_graph($msg) {
+    $line = date('c') . " " . $msg . "\n";
+    @file_put_contents(__DIR__ . '/meta_graph.log', $line, FILE_APPEND);
+  }
 }
 
 log_meta_graph("BOOT meta_purchase.php hit method=" . ($_SERVER['REQUEST_METHOD'] ?? ''));
