@@ -1,4 +1,7 @@
 <?php
+
+file_put_contents(__DIR__.'/BOOT.txt', date('c')." HIT\n", FILE_APPEND);
+
 header('Content-Type: application/json');
 
 // --- CORS ---
