@@ -23,6 +23,13 @@ function compact_filter($v) {
   return true;
 }
 
+function log_meta_graph($msg) {
+  $line = date('c') . " " . $msg . "\n";
+  @file_put_contents(__DIR__ . '/meta_graph.log', $line, FILE_APPEND);
+}
+
+log_meta_graph("BOOT meta_purchase.php hit method=" . ($_SERVER['REQUEST_METHOD'] ?? ''));
+
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
   j(405, ['error' => 'method not allowed', 'hint' => 'POST JSON to /meta_purchase.php']);
 }
