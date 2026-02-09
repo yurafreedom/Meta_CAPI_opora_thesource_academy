@@ -12,6 +12,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
 // --- /CORS ---
 
 function j($code, $arr) { http_response_code($code); echo json_encode($arr, JSON_UNESCAPED_UNICODE); exit; }
+
+function log_meta_graph($line) {
+  @file_put_contents(__DIR__ . '/meta_graph.log', date('c') . ' ' . $line . "\n", FILE_APPEND);
+}
+
 function compact_filter($v) {
   if ($v === null) return false;
   if (is_string($v) && trim($v) === '') return false;
@@ -117,27 +122,51 @@ if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
 
 $url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
 
+log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
+  " event_name=" . ($event['event_name'] ?? 'NULL') .
+  " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
+  " url=https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events");
+
 $ch = curl_init($url);
 curl_setopt_array($ch, [
   CURLOPT_POST => true,
   CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
   CURLOPT_POSTFIELDS => json_encode($bodyArr),
-
-  // ВАЖНО: чтобы не было зависаний -> 499/timeout
-  CURLOPT_CONNECTTIMEOUT => 5,
-  CURLOPT_TIMEOUT => 10,
+  CURLOPT_CONNECTTIMEOUT => 3,
+  CURLOPT_TIMEOUT => 12,
 ]);
 
 $res  = curl_exec($ch);
 $err  = curl_error($ch);
 $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$tt   = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
 
-$meta_json = null;
-if (is_string($res) && $res !== '') {
-  $meta_json = json_decode($res, true);
-  if (json_last_error() !== JSON_ERROR_NONE) $meta_json = null;
+$timed_out = ($code === 0) && $err && stripos($err, 'timed out') !== false;
+
+if ($timed_out) {
+  log_meta_graph("RETRY after timeout...");
+
+  curl_close($ch);
+  usleep(200000); // 200ms
+
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+    CURLOPT_POSTFIELDS => json_encode($bodyArr),
+    CURLOPT_CONNECTTIMEOUT => 3,
+    CURLOPT_TIMEOUT => 8,
+  ]);
+
+  $res  = curl_exec($ch);
+  $err  = curl_error($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  $tt   = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
 }
+
+log_meta_graph("RESP http={$code} err=" . ($err ?: '-') . " t={$tt} body=" . substr((string)$res, 0, 1500));
 
 curl_close($ch);
 

@@ -240,7 +240,9 @@ curl_setopt_array($ch, [
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
   CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
   CURLOPT_RETURNTRANSFER => true,
-  CURLOPT_TIMEOUT => 10,
+
+  CURLOPT_CONNECTTIMEOUT => 5,
+  CURLOPT_TIMEOUT => 25,          // было 10
 ]);
 $res = curl_exec($ch);
 $err  = curl_error($ch);
@@ -249,17 +251,12 @@ curl_close($ch);
 
 file_put_contents(
   __DIR__.'/meta_response.log',
-  date('c')
-  ." order=".$order_id
-  ." http=".$code
-  ." err=".$err
-  ." body=".substr((string)$res, 0, 2000)
-  ."\n",
+  date('c')." order={$order_id} http={$code} err={$err} body=".substr((string)$res, 0, 2000)."\n",
   FILE_APPEND
 );
 
 if ($res === false) {
-  upstash_cmd(["DEL", $dedupeKey]);
+  upstash_cmd(["DEL", $dedupeKey]); // важно, чтобы WFP retry мог добить
   http_response_code(502);
   ok_json(['error' => 'meta curl error', 'message' => $err]);
 }
