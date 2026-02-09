@@ -149,12 +149,11 @@ $data['merchantSignature'] = hash_hmac('md5', $signature_string, $merchantSecret
 // ===== DEBUG WFP SIGNATURE =====
 if (isset($_GET['dbg'])) {
   header('Content-Type: text/plain; charset=utf-8');
-
-  echo "signature_string:\n" . $signature_string . "\n\n";
-  echo "signature:\n" . $data['merchantSignature'] . "\n\n";
-  echo "amount=" . $data['amount'] . "\n";
-  echo "productPrice0=" . $productPrice[0] . "\n";
-
+  echo "returnUrl=" . $data['returnUrl'] . "\n";
+  echo "serviceUrl=" . $data['serviceUrl'] . "\n";
+  echo "orderReference=" . $data['orderReference'] . "\n";
+  echo "signature_string=" . $signature_string . "\n";
+  echo "sig=" . $data['merchantSignature'] . "\n";
   exit;
 }
 
