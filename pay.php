@@ -125,7 +125,7 @@ $data = [
   'productCount'        => $productCount,
   'productPrice'        => $productPrice,
 
-  'returnUrl'           => $returnBase . '?order_id=' . urlencode($order_id),
+  'returnUrl'           => $returnBase . '?orderReference=' . urlencode($order_id),
   'serviceUrl'          => $webhookUrl,
 ];
 

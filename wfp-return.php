@@ -17,8 +17,13 @@ function envv($k, $default = '') {
 }
 
 $order_id = trim((string)($_GET['order_id'] ?? ''));
+
 if ($order_id === '') {
-  $order_id = trim((string)($_POST['orderReference'] ?? $_POST['order_reference'] ?? ''));
+  $order_id = trim((string)(
+    $_GET['orderReference'] ?? $_GET['order_reference'] ??
+    $_POST['orderReference'] ?? $_POST['order_reference'] ?? $_POST['order_id'] ??
+    ''
+  ));
 }
 
 if ($order_id === '' || strlen($order_id) > 80) {
