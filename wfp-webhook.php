@@ -1,98 +1,169 @@
 <?php
-header('Content-Type: application/json');
+// wfp-webhook.php
 
-$secret = '57bc4ca0c366c9b29856c33355987fd1dec6a7db';
-
-$raw = file_get_contents('php://input');
-$data = json_decode($raw, true);
-
-if (!$data) {
-  http_response_code(400);
-  exit('bad json');
+function envv($k, $default = '') {
+  $v = getenv($k);
+  return ($v !== false && $v !== '') ? $v : $default;
 }
 
-/**
- * 1. Проверяем подпись WFP
- */
-$sign_str = implode(';', [
-  $data['merchantAccount'],
-  $data['orderReference'],
-  $data['amount'],
-  $data['currency'],
-  $data['authCode'],
-  $data['cardPan'],
-  $data['transactionStatus'],
-  $data['reasonCode']
-]);
+function upstash_cmd(array $cmd) {
+  $url = envv('UPSTASH_REDIS_REST_URL');
+  $token = envv('UPSTASH_REDIS_REST_TOKEN');
+  if (!$url || !$token) { throw new Exception("Upstash env missing"); }
 
-$calc_sign = hash_hmac('md5', $sign_str, $secret);
+  $ch = curl_init(rtrim($url, '/') . '/pipeline');
+  curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_HTTPHEADER => [
+      'Authorization: Bearer ' . $token,
+      'Content-Type: application/json',
+    ],
+    CURLOPT_POSTFIELDS => json_encode([$cmd], JSON_UNESCAPED_UNICODE),
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_TIMEOUT => 8,
+  ]);
+  $res = curl_exec($ch);
+  $err = curl_error($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
 
-if ($calc_sign !== $data['merchantSignature']) {
-  http_response_code(403);
-  exit('bad signature');
+  if ($res === false) throw new Exception("Upstash curl error: $err");
+  if ($code < 200 || $code >= 300) throw new Exception("Upstash HTTP $code: $res");
+
+  $j = json_decode($res, true);
+  return $j[0]['result'] ?? null;
 }
 
-/**
- * 2. Проверяем успешную оплату
- */
-if ($data['transactionStatus'] !== 'Approved') {
-  echo json_encode(['ok' => true, 'status' => 'not approved']);
+function ok_json($arr = []) {
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode($arr, JSON_UNESCAPED_UNICODE);
   exit;
 }
 
-$order_id = $data['orderReference'];
+// 1) читаем вход
+$raw = file_get_contents('php://input');
+$ct = $_SERVER['CONTENT_TYPE'] ?? '';
 
-/**
- * 3. Дедуп в Redis
- */
-function redis_set($key, $value) {
-  $url   = getenv('UPSTASH_REDIS_REST_URL');
-  $token = getenv('UPSTASH_REDIS_REST_TOKEN');
+file_put_contents(__DIR__.'/wfp.log', date('c')." CT=".$ct." RAW=".$raw.PHP_EOL, FILE_APPEND);
 
-  $ch = curl_init("$url/set/$key/$value");
-  curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-  curl_setopt($ch, CURLOPT_HTTPHEADER, ["Authorization: Bearer $token"]);
-  curl_exec($ch);
-  curl_close($ch);
+$data = null;
+if (stripos($ct, 'application/json') !== false) {
+  $data = json_decode($raw, true);
+} else {
+  // WFP часто шлёт form-data / x-www-form-urlencoded
+  $data = $_POST ?: json_decode($raw, true);
+}
+if (!is_array($data)) { http_response_code(400); ok_json(['error' => 'bad payload']); }
+
+// 2) забираем базовые поля
+$order_id = $data['orderReference'] ?? $data['order_reference'] ?? '';
+$status   = $data['transactionStatus'] ?? $data['status'] ?? '';
+$signature= $data['merchantSignature'] ?? $data['signature'] ?? '';
+
+if ($order_id === '') { http_response_code(400); ok_json(['error' => 'orderReference missing']); }
+
+// 3) Проверка подписи (ВАЖНО: порядок полей должен совпасть со спецификацией WFP callback)
+//
+// Ниже — типовой вариант для many callbacks WFP:
+// merchantAccount; orderReference; amount; currency; authCode; cardPan; transactionStatus; reasonCode
+//
+// Но: если в твоём callback другие поля — я подправлю 1 раз,
+// просто пришли пример payload из webhook (без карты/персональных).
+//
+$secret = envv('WFP_SECRET');
+$merchantAccount = $data['merchantAccount'] ?? envv('WFP_MERCHANT', '');
+
+$amount   = (string)($data['amount'] ?? '');
+$currency = (string)($data['currency'] ?? '');
+$authCode = (string)($data['authCode'] ?? '');
+$cardPan  = (string)($data['cardPan'] ?? '');
+$reasonCode = (string)($data['reasonCode'] ?? '');
+
+$signStr = implode(';', [
+  $merchantAccount,
+  $order_id,
+  $amount,
+  $currency,
+  $authCode,
+  $cardPan,
+  $status,
+  $reasonCode,
+]);
+
+$calc = hash_hmac('md5', $signStr, $secret);
+
+// В бою лучше timing-safe сравнение
+if (!hash_equals(strtolower($calc), strtolower($signature))) {
+  http_response_code(403);
+  ok_json(['error' => 'bad signature']);
 }
 
-redis_set("purchase:$order_id", "1");
+// 4) проверяем статус успеха
+$success = in_array(strtoupper($status), ['APPROVED', 'SUCCESS', 'ACCEPTED'], true);
+if (!$success) {
+  // можно логировать как failed payment
+  ok_json(['ok' => true, 'ignored' => 'not success', 'status' => $status]);
+}
 
-/**
- * 4. Meta CAPI Purchase
- */
-$pixel  = getenv('META_PIXEL_ID');
-$token  = getenv('META_CAPI_TOKEN');
+// 5) Дедуп: если уже отправляли Purchase по этому order_id — выходим OK
+$dedupeKey = "wfp:purchase_sent:$order_id";
+$setnx = upstash_cmd(["SET", $dedupeKey, "1", "NX", "EX", 60*60*24*90]); // 90 дней
+if ($setnx !== "OK") {
+  ok_json(['ok' => true, 'deduped' => true]);
+}
 
-$event = [
-  'event_name' => 'Purchase',
-  'event_time' => time(),
-  'event_id'   => $order_id,
-  'action_source' => 'website',
-  'user_data' => [],
-  'custom_data' => [
-    'currency' => $data['currency'],
-    'value'    => $data['amount']
-  ]
+// 6) Достаём token по order_id
+$mapKey = "wfp:order:$order_id";
+$mapJson = upstash_cmd(["GET", $mapKey]);
+$map = $mapJson ? json_decode($mapJson, true) : null;
+$token = is_array($map) ? ($map['token'] ?? '') : '';
+
+if ($token === '') {
+  // если маппинга нет — всё равно можно отправить Purchase только по order_id,
+  // но атрибуция будет хуже
+  $token = 'missing';
+}
+
+// 7) (опционально) достаём lead data по token: ph_sha256 / fbp / fbc / ua / ip
+$lead = null;
+if ($token !== 'missing') {
+  $leadJson = upstash_cmd(["GET", "lead:$token"]);
+  $lead = $leadJson ? json_decode($leadJson, true) : null;
+}
+
+// 8) Отправляем Meta Purchase (тут вызываешь свой meta-capi.php / или HTTP на Railway endpoint)
+// Главное: event_id = order_id
+// Ниже пример: дергаем ваш Railway endpoint /meta_purchase.php (поставь свой путь)
+$metaEndpoint = envv('META_PURCHASE_ENDPOINT', 'https://metacapioporathesourceacademy-production.up.railway.app/meta_purchase.php');
+
+$payload = [
+  'event_id' => $order_id,
+  'token'    => $token,
+  'amount'   => $amount,
+  'currency' => $currency,
+  'lead'     => $lead,
+  'source'   => 'wfp_webhook',
 ];
 
-$body = json_encode(['data' => [$event]]);
-
-$ch = curl_init("https://graph.facebook.com/v21.0/$pixel/events?access_token=$token");
+$ch = curl_init($metaEndpoint);
 curl_setopt_array($ch, [
   CURLOPT_POST => true,
-  CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-  CURLOPT_POSTFIELDS => $body
+  CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+  CURLOPT_RETURNTRANSFER => true,
+  CURLOPT_TIMEOUT => 10,
 ]);
-curl_exec($ch);
+$res = curl_exec($ch);
+$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 
-/**
- * 5. Ответ WFP
- */
-echo json_encode([
-  "orderReference" => $order_id,
-  "status" => "accept",
-  "time" => time()
-]);
+if ($code < 200 || $code >= 300) {
+  // ВАЖНО: если Meta упало — ты уже поставил dedupeKey.
+  // В проде лучше: при фейле удалить dedupeKey, чтобы WFP retry ещё раз сработал.
+  // Я обычно делаю так:
+  upstash_cmd(["DEL", $dedupeKey]);
+  http_response_code(502);
+  ok_json(['error' => 'meta failed', 'http' => $code, 'body' => $res]);
+}
+
+ok_json(['ok' => true]);
