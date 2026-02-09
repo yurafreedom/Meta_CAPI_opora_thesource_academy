@@ -69,21 +69,32 @@ if (empty($user_in) && $lead) {
   ];
 }
 
+// вытащим токен (как источник external_id)
+$token_raw =
+  (is_array($lead) ? ($lead['token'] ?? null) : null)
+  ?? ($p['token'] ?? null)
+  ?? ($user_in['external_id'] ?? null);
+
+$token_raw = is_string($token_raw) ? trim($token_raw) : null;
+
+// external_id должен быть sha256
+$external_id_sha = $token_raw ? hash('sha256', $token_raw) : null;
+
 // Нормализуем поля под формат Meta CAPI
 if (!empty($user_in['ph']) && is_string($user_in['ph'])) $user_in['ph'] = [ $user_in['ph'] ];
 if (!empty($user_in['em']) && is_string($user_in['em'])) $user_in['em'] = [ $user_in['em'] ];
 
 $user_data = array_filter([
-  'ph'  => isset($user_in['ph']) ? (is_array($user_in['ph']) ? $user_in['ph'] : [$user_in['ph']]) : null,
-  'em'  => isset($user_in['em']) ? (is_array($user_in['em']) ? $user_in['em'] : [$user_in['em']]) : null,
+  'ph' => isset($user_in['ph']) ? (is_array($user_in['ph']) ? $user_in['ph'] : [$user_in['ph']]) : null,
+  'em' => isset($user_in['em']) ? (is_array($user_in['em']) ? $user_in['em'] : [$user_in['em']]) : null,
   'fbp' => $user_in['fbp'] ?? null,
   'fbc' => $user_in['fbc'] ?? null,
 
-  // ✅ ВАЖНО: Meta требует SHA256
-  'external_id' => !empty($user_in['external_id'])
-    ? hash('sha256', (string)$user_in['external_id'])
-    : null,
+  // ✅ external_id: sha256, и как массив
+  'external_id' => $external_id_sha ? [ $external_id_sha ] : null,
 
+  // (опционально) юзер-агент, норм
+  'client_user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
 ], 'compact_filter');
 
 if (empty($user_data)) {

@@ -37,18 +37,18 @@ function upstash_request($path, $method='GET', $jsonBody=null){
   return [$code, $resp];
 }
 
-// best-effort лог: никогда не стопаем purchase из-за логов
-function log_step($step, $data = [], $level = 'info'){
-  global $DEBUG_ID;
-  $row = [
-    'debug_id' => $DEBUG_ID,
-    'level' => $level,
-    'step' => $step,
-    'ts_server' => time(),
-    'data' => $data
-  ];
-  try { upstash_lpush_json('purchase_logs', $row); } catch (\Throwable $e) {}
-}
+// // best-effort лог: никогда не стопаем purchase из-за логов
+// function log_step($step, $data = [], $level = 'info'){
+//   global $DEBUG_ID;
+//   $row = [
+//     'debug_id' => $DEBUG_ID,
+//     'level' => $level,
+//     'step' => $step,
+//     'ts_server' => time(),
+//     'data' => $data
+//   ];
+//   try { upstash_lpush_json('purchase_logs', $row); } catch (\Throwable $e) {}
+// }
 
 function upstash_lpush_json($key, $valueArr){
   return upstash_request('/lpush/' . rawurlencode($key), 'POST', [ $valueArr ]);
@@ -177,6 +177,10 @@ $DEBUG_ID = 'p_' . substr(bin2hex(random_bytes(8)), 0, 16);
 
 function log_step($step, $data = [], $level = 'info'){
   global $DEBUG_ID;
+
+  // логируем только ошибки и meta_graph
+  if ($level !== 'error' && $step !== 'meta_graph') return;
+
   $row = [
     'debug_id' => $DEBUG_ID,
     'level' => $level,
@@ -184,9 +188,12 @@ function log_step($step, $data = [], $level = 'info'){
     'ts_server' => time(),
     'data' => $data
   ];
+
   list($c, $r) = upstash_lpush_json('purchase_logs', $row);
 
-  // если Upstash не принял — допиши это прямо в error_log PHP
+  // держим последние 2000 записей
+  upstash_request('/ltrim/' . rawurlencode('purchase_logs') . '/0/2000');
+
   if (!($c >= 200 && $c < 300)) {
     error_log("UPSTASH_LPUSH_FAILED debug_id=$DEBUG_ID step=$step http=$c resp=" . substr((string)$r,0,200));
   }
@@ -297,10 +304,12 @@ if (!$ACCESS_TOKEN || !$PIXEL_ID) {
   out(500, ['error' => 'missing META_CAPI_TOKEN or META_PIXEL_ID', 'debug_id' => $DEBUG_ID]);
 }
 
+$external_id_sha = $token ? hash('sha256', $token) : null;
+
 // user_data (Meta expects ph/em as arrays)
 $user_data = array_filter([
   'ph' => $ph_sha256 ? [$ph_sha256] : null,
-  'external_id' => $token ?: null,
+  'external_id' => $external_id_sha ? [$external_id_sha] : null,
   'client_user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
 ], function($v){
   if ($v === null) return false;
@@ -383,4 +392,15 @@ if ($http < 200 || $http >= 300) out($http ?: 500, [
   'meta_http' => $http,
   'meta_body' => $res,
   'sent_preview' => substr(json_encode($bodyArr, JSON_UNESCAPED_UNICODE), 0, 500),
+]);
+
+  // ✅ META OK -> SET DEDUP
+list($sc, $sr) = upstash_set('purchase:' . $token, '1', 60*60*24*30);
+log_step('dedup_set', ['http'=>$sc, 'resp_preview'=>is_string($sr)?substr($sr,0,200):$sr], ($sc>=200 && $sc<300) ? 'info' : 'error');
+
+out(200, [
+  'ok' => true,
+  'debug_id' => $DEBUG_ID,
+  'meta_http' => $http,
+  'meta_body' => $res,
 ]);
