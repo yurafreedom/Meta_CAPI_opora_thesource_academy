@@ -55,19 +55,53 @@ function ok_json($arr = []) {
   exit;
 }
 
-// 1) читаем вход
+// 1) читаем вход (устойчивый парсер)
 $data = null;
-if (stripos($ct, 'application/json') !== false) {
-  $data = json_decode($raw, true);
-} else {
-  $data = $_POST ?: json_decode($raw, true);
+
+// сначала пробуем JSON из RAW (самое надёжное)
+if ($raw !== '') {
+  $j = json_decode($raw, true);
+  if (is_array($j)) $data = $j;
+}
+
+// если JSON не распарсился — пробуем обычный $_POST
+if (!is_array($data) && !empty($_POST)) {
+
+  // кейс “один ключ = весь JSON, значение пустое”
+  if (count($_POST) === 1) {
+    $k = array_key_first($_POST);
+    $v = $_POST[$k];
+
+    // защита от пустой строки ключа
+    if (is_string($k) && $v === '' && $k !== '' && ($k[0] === '{' || $k[0] === '[')) {
+      $j2 = json_decode($k, true);
+      if (is_array($j2)) $data = $j2;
+    }
+  }
+
+  // обычный form post
+  if (!is_array($data)) $data = $_POST;
+}
+
+// если и так не получилось — пробуем разобрать как querystring
+if (!is_array($data) && $raw !== '') {
+  $tmp = [];
+  parse_str($raw, $tmp);
+  if (!empty($tmp)) $data = $tmp;
 }
 
 if (!is_array($data)) { http_response_code(400); ok_json(['error' => 'bad payload']); }
 
 // ✅ ЛОГ (временно) — после того как $data уже распарсен
 $log = $data;
-unset($log['cardPan'], $log['card_pan'], $log['merchantSignature'], $log['signature']);
+unset(
+  $log['cardPan'],
+  $log['card_pan'],
+  $log['merchantSignature'],
+  $log['signature'],
+  $log['email'],
+  $log['phone']
+);
 file_put_contents(__DIR__.'/wfp.log', date('c')." CT=".$ct." ".json_encode($log, JSON_UNESCAPED_UNICODE).PHP_EOL, FILE_APPEND);
 
 // 2) забираем базовые поля
@@ -151,6 +185,8 @@ if ($token !== 'missing') {
 // Главное: event_id = order_id
 // Ниже пример: дергаем ваш Railway endpoint /meta_purchase.php (поставь свой путь)
 $metaEndpoint = envv('META_PURCHASE_ENDPOINT', 'https://metacapioporathesourceacademy-production.up.railway.app/meta_purchase.php');
+
+error_log("[META] order={$order_id} http={$code} body=" . substr((string)$res, 0, 2000));
 
 $payload = [
   'event_name' => 'Purchase',
