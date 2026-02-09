@@ -1,6 +1,8 @@
 <?php
 // wfp-webhook.php
 
+file_put_contents(__DIR__.'/parse_check.log', date('c')." HIT\n", FILE_APPEND);
+
 $raw = file_get_contents('php://input') ?: '';
 $ct  = $_SERVER['CONTENT_TYPE'] ?? '';
 
@@ -168,10 +170,17 @@ $signStr = implode(';', [
 
 $calc = hash_hmac('md5', $signStr, $secret);
 
-// В бою лучше timing-safe сравнение
-if (!hash_equals(strtolower($calc), strtolower($signature))) {
-  http_response_code(403);
-  ok_json(['error' => 'bad signature']);
+// ✅ DEV bypass (временно) — чтобы тестировать путь до Meta без реальной подписи
+$dev = envv('DEV_BYPASS_WFP_SIGNATURE', '0');
+
+if ($dev !== '1') {
+  if (!hash_equals(strtolower($calc), strtolower($signature))) {
+    http_response_code(403);
+    ok_json(['error' => 'bad signature']);
+  }
+} else {
+  // полезно логировать, что ты реально в bypass
+  file_put_contents(__DIR__.'/parse_check.log', date('c')." DEV_BYPASS_WFP_SIGNATURE=1\n", FILE_APPEND);
 }
 
 // 4) проверяем статус успеха
@@ -212,8 +221,6 @@ if ($token !== 'missing') {
 // Ниже пример: дергаем ваш Railway endpoint /meta_purchase.php (поставь свой путь)
 $metaEndpoint = envv('META_PURCHASE_ENDPOINT', 'https://metacapioporathesourceacademy-production.up.railway.app/meta_purchase.php');
 
-error_log("[META] order={$order_id} http={$code} body=" . substr((string)$res, 0, 2000));
-
 $payload = [
   'event_name' => 'Purchase',
   'event_time' => time(),
@@ -236,6 +243,7 @@ curl_setopt_array($ch, [
   CURLOPT_TIMEOUT => 10,
 ]);
 $res = curl_exec($ch);
+$err  = curl_error($ch);
 $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 
@@ -244,6 +252,7 @@ file_put_contents(
   date('c')
   ." order=".$order_id
   ." http=".$code
+  ." err=".$err
   ." body=".substr((string)$res, 0, 2000)
   ."\n",
   FILE_APPEND
