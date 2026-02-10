@@ -193,7 +193,13 @@ if (!$success) {
 // 5) Дедуп: если уже отправляли Purchase по этому order_id — выходим OK
 $dedupeKey = "wfp:purchase_sent:$order_id";
 $setnx = upstash_cmd(["SET", $dedupeKey, "1", "NX", "EX", 60*60*24*90]); // 90 дней
+
 if ($setnx !== "OK") {
+  file_put_contents(
+    __DIR__ . '/wfp_dedup.log',
+    date('c') . " DEDUP order={$order_id}\n",
+    FILE_APPEND
+  );
   ok_json(['ok' => true, 'deduped' => true]);
 }
 
@@ -214,6 +220,32 @@ $lead = null;
 if ($token !== 'missing') {
   $leadJson = upstash_cmd(["GET", "lead:$token"]);
   $lead = $leadJson ? json_decode($leadJson, true) : null;
+}
+
+// 7.1) Если нет phone hash — НЕ отправляем Purchase (качество будет мусор)
+// Логируем пропуск, но webhook отвечаем быстро (ok:true), чтобы WFP не ретраил бесконечно.
+$ph = (is_array($lead) ? ($lead['ph_sha256'] ?? '') : '');
+$ph = is_string($ph) ? strtolower(trim($ph)) : '';
+$is_ph_valid = (bool)preg_match('~^[0-9a-f]{64}$~', $ph);
+
+if (!$is_ph_valid) {
+  // Лог пропуска
+  file_put_contents(
+    __DIR__ . '/wfp_skip.log',
+    date('c') . " SKIP_NO_PHONE order={$order_id} token={$token} has_lead=" . (is_array($lead) ? '1' : '0') .
+    " fbp=" . (is_array($lead) ? ($lead['fbp'] ?? '') : '') .
+    " fbc=" . (is_array($lead) ? ($lead['fbc'] ?? '') : '') .
+    " page=" . (is_array($lead) ? ($lead['page_url'] ?? '') : '') .
+    "\n",
+    FILE_APPEND
+  );
+
+  // ВАЖНО: дедуп-ключ уже мог быть поставлен выше.
+  // Чтобы не “навсегда похоронить” заказ без телефона — удалим дедуп,
+  // чтобы WFP retry (или ручной повтор) мог отправить позже, когда phone появится.
+  upstash_cmd(["DEL", $dedupeKey]);
+
+  ok_json(['ok' => true, 'skipped' => 'no_phone_hash']);
 }
 
 // 8) Отправляем Purchase напрямую в Meta Graph API (без self-call на /meta_purchase.php)
@@ -241,8 +273,16 @@ $external_id_sha = ($token && $token !== 'missing')
   ? hash('sha256', $token)
   : hash('sha256', $order_id);
 
+$ph_sha = $ph; // уже провалидирован выше
+
 $user_data = array_filter([
+  // ✅ phone hash (самое важное)
+  'ph' => ($ph_sha !== '' ? [ $ph_sha ] : null),
+
+  // ✅ external_id (sha256)
   'external_id' => [ $external_id_sha ],
+
+  // ✅ fbp/fbc + ip/ua
   'fbp' => (is_array($lead) ? ($lead['fbp'] ?? null) : null),
   'fbc' => (is_array($lead) ? ($lead['fbc'] ?? null) : null),
   'client_ip_address' => (is_array($lead) ? ($lead['ip'] ?? null) : null),
@@ -254,12 +294,19 @@ $user_data = array_filter([
   return true;
 });
 
+// ✅ чтобы в логах видеть, был ли phone hash в lead
+log_meta_graph(
+  "USERDATA order={$order_id} token={$token} has_ph=" . (isset($user_data['ph']) ? '1' : '0') .
+  " has_fbp=" . (isset($user_data['fbp']) ? '1' : '0') .
+  " has_fbc=" . (isset($user_data['fbc']) ? '1' : '0')
+);
+
 $event = array_filter([
   'event_name' => 'Purchase',
   'event_time' => time(),
   'event_id'   => $order_id, // дедуп на стороне Meta
   'action_source' => 'website',
-  'event_source_url' => (is_array($lead) ? ($lead['page_url'] ?? null) : null),
+  'event_source_url' => (is_array($lead) ? ($lead['page_url'] ?? null) : null) ?? envv('DEFAULT_EVENT_SOURCE_URL', ''),
   'user_data' => $user_data,
   'custom_data' => [
     'currency' => $currency,

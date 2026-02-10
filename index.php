@@ -1,5 +1,5 @@
 <?php
-// index.php (или collect.php) — принимает GET (image beacon) и сохраняет lead в Upstash
+// index.php (collect.php) — принимает GET (image beacon) и сохраняет lead в Upstash
 header("Access-Control-Allow-Origin: *");
 
 function out($code, $arr){
@@ -35,11 +35,26 @@ function upstash_request($path, $method = 'GET', $jsonBody = null){
   return [$code, $resp];
 }
 
+function upstash_get_json($key){
+  // GET key -> returns JSON string (we stored as JSON string)
+  list($code, $resp) = upstash_request('/get/' . rawurlencode($key));
+  if (!($code >= 200 && $code < 300)) return [null, $code, $resp];
+
+  $j = json_decode($resp, true);
+  // Upstash REST returns: {"result":"..."} OR array variants depending on endpoint
+  $raw = null;
+  if (is_array($j) && array_key_exists('result', $j)) $raw = $j['result'];
+  if (!is_string($raw) || $raw === '') return [null, $code, $resp];
+
+  $arr = json_decode($raw, true);
+  if (!is_array($arr)) return [null, $code, $resp];
+
+  return [$arr, $code, $resp];
+}
+
 function upstash_set_json($key, $valueArr, $ttlSeconds = 60*60*24*14){
-  // ВАЖНО: кладём JSON строкой через POST, чтобы не упираться в длину URL
   $json = json_encode($valueArr, JSON_UNESCAPED_UNICODE);
 
-  // SET key "json-string"
   list($code, $resp) = upstash_request(
     '/set/' . rawurlencode($key),
     'POST',
@@ -47,7 +62,6 @@ function upstash_set_json($key, $valueArr, $ttlSeconds = 60*60*24*14){
   );
   if (!($code >= 200 && $code < 300)) return [$code, $resp];
 
-  // EXPIRE key ttl
   list($code2, $resp2) = upstash_request(
     '/expire/' . rawurlencode($key) . '/' . intval($ttlSeconds)
   );
@@ -57,7 +71,6 @@ function upstash_set_json($key, $valueArr, $ttlSeconds = 60*60*24*14){
 }
 
 function upstash_lpush_json($key, $valueArr){
-  // LPUSH key "json-string"
   $json = json_encode($valueArr, JSON_UNESCAPED_UNICODE);
   return upstash_request(
     '/lpush/' . rawurlencode($key),
@@ -66,47 +79,114 @@ function upstash_lpush_json($key, $valueArr){
   );
 }
 
+function s($v, $max = 500){
+  $v = is_string($v) ? trim($v) : '';
+  if ($v === '') return '';
+  if (strlen($v) > $max) $v = substr($v, 0, $max);
+  return $v;
+}
+
+function ip_from_headers(){
+  // Railway обычно прокидывает x-forwarded-for
+  $xff = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '';
+  if (is_string($xff) && $xff !== '') {
+    $parts = array_map('trim', explode(',', $xff));
+    if (!empty($parts[0])) return $parts[0];
+  }
+  $rip = $_SERVER['REMOTE_ADDR'] ?? '';
+  return is_string($rip) ? $rip : '';
+}
+
+function merge_keep_first_nonempty(array $old, array $new, array $keepFirstKeys){
+  // Для keepFirstKeys: если в old уже есть непустое — не затираем
+  foreach ($keepFirstKeys as $k) {
+    $ov = $old[$k] ?? null;
+    $nv = $new[$k] ?? null;
+
+    $old_has = !(($ov === null) || (is_string($ov) && trim($ov) === ''));
+    $new_has = !(($nv === null) || (is_string($nv) && trim($nv) === ''));
+
+    if ($old_has) {
+      // оставляем old
+      $new[$k] = $ov;
+    } else {
+      // берём new если есть, иначе null
+      if (!$new_has) unset($new[$k]);
+    }
+  }
+
+  // Остальные поля — можно обновлять (например reason/page_url/ts)
+  return array_merge($old, $new);
+}
+
 // -------- input --------
-$token     = trim($_GET['token'] ?? '');
-$ph_sha256 = strtolower(trim($_GET['ph_sha256'] ?? ''));
+$token = s($_GET['token'] ?? '', 120);
 
 // healthcheck
-if ($token === '' && $ph_sha256 === '') {
-  out(200, ['ok'=>true, 'service'=>'alive', 'hint'=>'pass ?token=...&ph_sha256=...']);
+if ($token === '') {
+  out(200, ['ok'=>true, 'service'=>'alive', 'hint'=>'pass ?token=... (&ph_sha256=... optional)']);
 }
-if ($token === '' || $ph_sha256 === '') {
-  out(400, ['ok'=>false, 'error'=>'missing_token_or_ph_sha256']);
-}
+
+$ph_sha256 = strtolower(s($_GET['ph_sha256'] ?? '', 80));
+$fbp = s($_GET['fbp'] ?? '', 220);
+$fbc = s($_GET['fbc'] ?? '', 220);
 
 $record = [
   'token' => $token,
+
+  // optional
   'ph_sha256' => $ph_sha256,
+  'fbp' => $fbp,
+  'fbc' => $fbc,
 
-  'ts' => (int)($_GET['ts'] ?? time()*1000),
+  // server-side
+  'ip' => ip_from_headers(),
+  'ua' => s($_SERVER['HTTP_USER_AGENT'] ?? '', 400),
+
+  'ts' => (int)($_GET['ts'] ?? (time()*1000)),
   'ts_server' => time(),
-  'reason' => (string)($_GET['r'] ?? 'collect'),
+  'reason' => s($_GET['r'] ?? 'collect', 80),
 
-  'page_url' => (string)($_GET['u'] ?? ''),
-  'referrer' => (string)($_GET['ref'] ?? ''),
-  'name' => (string)($_GET['name'] ?? ''),
+  'page_url' => s($_GET['u'] ?? '', 800),
+  'referrer' => s($_GET['ref'] ?? '', 800),
+  'name' => s($_GET['name'] ?? '', 120),
 
-  'utm_source' => (string)($_GET['utm_source'] ?? ''),
-  'utm_campaign' => (string)($_GET['utm_campaign'] ?? ''),
-  'utm_term' => (string)($_GET['utm_term'] ?? ''),
-  'utm_content' => (string)($_GET['utm_content'] ?? ''),
+  'utm_source' => s($_GET['utm_source'] ?? '', 120),
+  'utm_campaign' => s($_GET['utm_campaign'] ?? '', 200),
+  'utm_term' => s($_GET['utm_term'] ?? '', 200),
+  'utm_content' => s($_GET['utm_content'] ?? '', 200),
 ];
 
-// 1) last-by-token (основа для /thanks)
-list($code1, $resp1) = upstash_set_json('lead:' . $token, $record, 60*60*24*14);
+// убираем пустые строки, чтобы merge был чище
+foreach ($record as $k => $v) {
+  if ($v === '' || $v === null) unset($record[$k]);
+}
 
-// 2) events log (опционально, но полезно)
+// 0) get existing lead
+$leadKey = 'lead:' . $token;
+list($oldLead, $gCode, $gResp) = upstash_get_json($leadKey);
+if (!is_array($oldLead)) $oldLead = [];
+
+// 1) merge (важно: phone/fbp/fbc/ip/ua сохраняем как “первое непустое”)
+$merged = merge_keep_first_nonempty($oldLead, $record, [
+  'ph_sha256','fbp','fbc','ip','ua',
+  'utm_source','utm_campaign','utm_term','utm_content',
+  'referrer','page_url','name'
+]);
+
+// 2) save merged
+list($code1, $resp1) = upstash_set_json($leadKey, $merged, 60*60*24*14);
+
+// 3) events log (опционально)
 list($code2, $resp2) = upstash_lpush_json('leads_events', $record);
 
 out(200, [
   'ok' => true,
   'saved' => ($code1 >= 200 && $code1 < 300),
-  'where' => 'upstash',
   'token' => $token,
+  'has_ph' => isset($merged['ph_sha256']) ? true : false,
+  'has_fbp' => isset($merged['fbp']) ? true : false,
+  'has_fbc' => isset($merged['fbc']) ? true : false,
   'set' => [$code1, $resp1],
   'lpush' => [$code2, $resp2],
 ]);
