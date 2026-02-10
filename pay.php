@@ -70,7 +70,11 @@ if (!$merchantSecretKey) { http_response_code(500); exit('WFP secret missing'); 
 function fmt_money($x) { return number_format((float)$x, 2, '.', ''); }
 
 $token = trim($_GET['token'] ?? $_POST['token'] ?? '');
-if ($token === '' || strlen($token) > 80) { http_response_code(400); exit('Token missing/bad'); }
+// жёсткая защита от плейсхолдеров и мусора
+if ($token === '' || strlen($token) > 120 || strpos($token, '{') !== false || strpos($token, '}') !== false) {
+  http_response_code(400);
+  exit('Token missing/bad');
+}
 
 $amount_raw = envv('PRICE_UAH', '1');               // тест = 1 грн через ENV
 $amount     = (float)$amount_raw;
@@ -110,7 +114,7 @@ $payload = [
 $k = "wfp:order:$order_id";
 upstash_pipeline([
   ["SET", $k, json_encode($payload, JSON_UNESCAPED_UNICODE)],
-  ["EXPIRE", $k, 60 * 60 * 24 * 90],
+  ["EXPIRE", $k, 60 * 60 * 24 * 90],а
 ]);
 
 // 2) WFP fields
