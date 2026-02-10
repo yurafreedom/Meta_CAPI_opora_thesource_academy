@@ -1,6 +1,7 @@
 <?php
 // wfp-webhook.php
 
+@file_put_contents(__DIR__ . '/meta_graph.log', date('c')." WEBHOOK_HIT\n", FILE_APPEND);
 file_put_contents(__DIR__.'/parse_check.log', date('c')." HIT\n", FILE_APPEND);
 
 $raw = file_get_contents('php://input') ?: '';
@@ -221,6 +222,15 @@ if ($token !== 'missing') {
   $leadJson = upstash_cmd(["GET", "lead:$token"]);
   $lead = $leadJson ? json_decode($leadJson, true) : null;
 }
+
+@file_put_contents(__DIR__ . '/meta_graph.log',
+  date('c')
+  . " DEBUG leadJson_len=" . strlen((string)$leadJson)
+  . " lead_is_array=" . (is_array($lead) ? '1' : '0')
+  . " ph=" . (is_array($lead) ? ($lead['ph_sha256'] ?? '') : '')
+  . "\n",
+  FILE_APPEND
+);
 
 // 7.1) Если нет phone hash — НЕ отправляем Purchase (качество будет мусор)
 // Логируем пропуск, но webhook отвечаем быстро (ok:true), чтобы WFP не ретраил бесконечно.
