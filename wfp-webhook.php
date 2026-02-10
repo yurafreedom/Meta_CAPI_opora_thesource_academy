@@ -228,6 +228,8 @@ $ph = (is_array($lead) ? ($lead['ph_sha256'] ?? '') : '');
 $ph = is_string($ph) ? strtolower(trim($ph)) : '';
 $is_ph_valid = (bool)preg_match('~^[0-9a-f]{64}$~', $ph);
 
+@file_put_contents(__DIR__ . '/meta_graph.log', date('c') . " WEBHOOK_HIT order={$order_id} token={$token}\n", FILE_APPEND);
+
 if (!$is_ph_valid) {
   // Лог пропуска
   file_put_contents(

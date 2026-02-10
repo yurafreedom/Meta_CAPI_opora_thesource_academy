@@ -52,22 +52,23 @@ function upstash_get_json($key){
   return [$arr, $code, $resp];
 }
 
-function upstash_set_json($key, $valueArr, $ttlSeconds = 60*60*24*14){
-  $json = json_encode($valueArr, JSON_UNESCAPED_UNICODE);
-
+function upstash_set_raw($key, $value, $ttlSeconds){
+  // value кладём как raw string в Redis через REST: /set/<key>/<value>
   list($code, $resp) = upstash_request(
-    '/set/' . rawurlencode($key),
-    'POST',
-    [ $json ]
+    '/set/' . rawurlencode($key) . '/' . rawurlencode($value)
   );
   if (!($code >= 200 && $code < 300)) return [$code, $resp];
 
   list($code2, $resp2) = upstash_request(
     '/expire/' . rawurlencode($key) . '/' . intval($ttlSeconds)
   );
-  if (!($code2 >= 200 && $code2 < 300)) return [$code2, $resp2];
+  return [$code2, $resp2];
+}
 
-  return [$code, $resp];
+function upstash_set_json($key, $valueArr, $ttlSeconds = 60*60*24*14){
+  // храним в Redis ОДНУ JSON-строку (без [ "..." ] и без двойного экранирования)
+  $json = json_encode($valueArr, JSON_UNESCAPED_UNICODE);
+  return upstash_set_raw($key, $json, $ttlSeconds);
 }
 
 function upstash_lpush_json($key, $valueArr){
