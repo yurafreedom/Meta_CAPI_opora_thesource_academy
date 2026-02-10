@@ -114,7 +114,7 @@ $payload = [
 $k = "wfp:order:$order_id";
 upstash_pipeline([
   ["SET", $k, json_encode($payload, JSON_UNESCAPED_UNICODE)],
-  ["EXPIRE", $k, 60 * 60 * 24 * 90],а
+  ["EXPIRE", $k, 60 * 60 * 24 * 90],
 ]);
 
 // 2) WFP fields
