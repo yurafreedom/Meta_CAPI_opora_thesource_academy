@@ -78,18 +78,18 @@ if ($token === '' || strlen($token) > 120 || strpos($token, '{') !== false || st
 
 $amount_raw = envv('PRICE_UAH', '290');
 $amount     = (float)$amount_raw;
-$amount_str = fmt_money($amount); // "290.00"
-
-// $amount_raw = envv('PRICE_UAH', '1');               // тест = 1 грн через ENV
-// $amount     = (float)$amount_raw;
 
 if ($amount < 1 || $amount > 100000) {
   http_response_code(400);
   exit('Bad amount');
 }
 
-$amount_str = fmt_money($amount);                  // "1.00"
+$amount_str = fmt_money($amount); // "290.00"
 $currency    = envv('CURRENCY', 'UAH');
+
+// $amount_raw = envv('PRICE_UAH', '1');               // тест = 1 грн через ENV
+// $amount     = (float)$amount_raw;
+
 
 $order_id   = 'ord_' . bin2hex(random_bytes(8));
 $orderDate  = time();
