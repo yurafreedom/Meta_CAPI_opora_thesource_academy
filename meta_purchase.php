@@ -1,8 +1,23 @@
 <?php
+/**
+ * meta_purchase.php — отправка события в Meta CAPI
+ * Ожидает POST JSON:
+ * {
+ *   "event_name": "Purchase",
+ *   "event_time": 1700000000,
+ *   "event_id": "abc123",
+ *   "event_source_url": "https://...",
+ *   "token": "lead_token_optional",
+ *   "name": "Full Name optional",
+ *   "user": { "ph": "...", "em": "...", "fbp": "...", "fbc": "...", "external_id": "..." },
+ *   "lead": { ... } // обычно то, что ты достал из Upstash: lead:$token
+ *   "custom_data": { ... }
+ * }
+ */
 
-file_put_contents(__DIR__.'/BOOT.txt', date('c')." HIT\n", FILE_APPEND);
+file_put_contents(__DIR__ . '/BOOT.txt', date('c') . " HIT\n", FILE_APPEND);
 
-header('Content-Type: application/json');
+header('Content-Type: application/json; charset=utf-8');
 
 // --- CORS ---
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
@@ -14,20 +29,21 @@ header("Access-Control-Max-Age: 86400");
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { http_response_code(204); exit; }
 // --- /CORS ---
 
-function j($code, $arr) {
+function j(int $code, array $arr): void {
   http_response_code($code);
   echo json_encode($arr, JSON_UNESCAPED_UNICODE);
   exit;
 }
 
-function compact_filter($v) {
+function compact_filter($v): bool {
   if ($v === null) return false;
   if (is_string($v) && trim($v) === '') return false;
+  if (is_array($v) && empty($v)) return false;
   return true;
 }
 
 if (!function_exists('log_meta_graph')) {
-  function log_meta_graph($msg) {
+  function log_meta_graph(string $msg): void {
     $line = date('c') . " " . $msg . "\n";
     @file_put_contents(__DIR__ . '/meta_graph.log', $line, FILE_APPEND);
   }
@@ -42,7 +58,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
 $ACCESS_TOKEN    = getenv('META_CAPI_TOKEN');
 $PIXEL_ID        = getenv('META_PIXEL_ID');
 $TEST_EVENT_CODE = getenv('META_TEST_EVENT_CODE');
-$API_VERSION     = 'v21.0';
+$API_VERSION     = getenv('META_API_VERSION') ?: 'v21.0';
 
 if (!$ACCESS_TOKEN || !$PIXEL_ID) {
   j(500, [
@@ -66,17 +82,21 @@ if (!is_array($p)) {
   ]);
 }
 
-$lead = is_array($p['lead'] ?? null) ? $p['lead'] : null;
+$lead = is_array($p['lead'] ?? null) ? $p['lead'] : [];
+$user_in = is_array($p['user'] ?? null) ? $p['user'] : [];
 
-$event_name = $p['event_name'] ?? 'Purchase';
+// --- event name/time ---
+$event_name = is_string($p['event_name'] ?? null) && $p['event_name'] !== '' ? $p['event_name'] : 'Purchase';
+
 $event_time = !empty($p['event_time']) ? (int)$p['event_time'] : time();
 $now = time();
+// допускаем 7 дней назад, и +10 минут вперёд
 if ($event_time < 1000000000 || $event_time > $now + 600 || $event_time < $now - 7*24*3600) {
   $event_time = $now;
 }
 
-$user_in = is_array($p['user'] ?? null) ? $p['user'] : [];
-if (empty($user_in) && $lead) {
+// --- если user не передали, поднимем из lead ---
+if (empty($user_in) && !empty($lead)) {
   $user_in = [
     'ph' => $lead['ph_sha256'] ?? null,
     'em' => $lead['em_sha256'] ?? null,
@@ -86,35 +106,64 @@ if (empty($user_in) && $lead) {
   ];
 }
 
-// токен как источник external_id
+// --- external_id: SHA256(token) ---
 $token_raw =
   (is_array($lead) ? ($lead['token'] ?? null) : null)
   ?? ($p['token'] ?? null)
   ?? ($user_in['external_id'] ?? null);
 
 $token_raw = is_string($token_raw) ? trim($token_raw) : null;
-
-// external_id должен быть sha256
 $external_id_sha = $token_raw ? hash('sha256', $token_raw) : null;
 
-// нормализуем массивы
-if (!empty($user_in['ph']) && is_string($user_in['ph'])) $user_in['ph'] = [ $user_in['ph'] ];
-if (!empty($user_in['em']) && is_string($user_in['em'])) $user_in['em'] = [ $user_in['em'] ];
+// --- нормализация имени -> fn SHA256 ---
+function norm_name($s): string {
+  $s = is_string($s) ? trim(mb_strtolower($s, 'UTF-8')) : '';
+  if ($s === '') return '';
+  $s = preg_replace('/\s+/u', ' ', $s);
+  $s = preg_replace('/[^\p{L}\s-]/u', '', $s); // только буквы/пробел/дефис
+  $s = preg_replace('/\s+/u', ' ', $s);
+  return trim($s);
+}
 
+$full_name = $lead['name'] ?? ($p['name'] ?? '');
+$full_name = norm_name($full_name);
+
+$fn_sha = null;
+if ($full_name !== '') {
+  $parts = preg_split('/\s+/u', $full_name);
+  $fn = $parts[0] ?? '';
+  if (is_string($fn) && $fn !== '') $fn_sha = hash('sha256', $fn);
+}
+
+// --- нормализуем массивы полей, которые Meta ждёт как array<string> ---
+if (!empty($user_in['ph']) && is_string($user_in['ph'])) $user_in['ph'] = [$user_in['ph']];
+if (!empty($user_in['em']) && is_string($user_in['em'])) $user_in['em'] = [$user_in['em']];
+
+// --- user_data для Meta ---
 $user_data = array_filter([
+  'fn' => $fn_sha ? [$fn_sha] : null,
+
+  // hashed identifiers
   'ph' => isset($user_in['ph']) ? (is_array($user_in['ph']) ? $user_in['ph'] : [$user_in['ph']]) : null,
   'em' => isset($user_in['em']) ? (is_array($user_in['em']) ? $user_in['em'] : [$user_in['em']]) : null,
+
+  // cookies
   'fbp' => $user_in['fbp'] ?? null,
   'fbc' => $user_in['fbc'] ?? null,
-  'external_id' => $external_id_sha ? [ $external_id_sha ] : null,
+
+  // deterministic id
+  'external_id' => $external_id_sha ? [$external_id_sha] : null,
+
+  // context
   'client_user_agent' => $lead['ua'] ?? null,
   'client_ip_address' => $lead['ip'] ?? null,
 ], 'compact_filter');
 
 if (empty($user_data)) {
-  j(400, ['error' => 'missing user_data', 'need_one_of' => ['ph','em','fbp','fbc','external_id']]);
+  j(400, ['error' => 'missing user_data', 'need_one_of' => ['ph','em','fbp','fbc','external_id','fn']]);
 }
 
+// --- event payload ---
 $event = array_filter([
   'event_name' => $event_name,
   'event_id' => $p['event_id'] ?? null,
@@ -128,10 +177,8 @@ $event = array_filter([
 $bodyArr = ['data' => [$event]];
 if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
 
-// URL с токеном — только для запроса
+// --- request ---
 $url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
-
-// safeUrl — только для логов
 $safeUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
 
 log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
@@ -155,16 +202,14 @@ curl_setopt_array($ch, [
 $res   = curl_exec($ch);
 $err   = curl_error($ch);
 $errno = curl_errno($ch);
-$code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$code  = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
-$timed_out = ($errno === 28); // CURLE_OPERATION_TIMEDOUT
-
-if ($timed_out) {
+if ($errno === 28) { // timeout
   $did_retry = 1;
   log_meta_graph("RETRY after timeout errno=28 ...");
 
   curl_close($ch);
-  usleep(200000); // 200ms
+  usleep(200000);
 
   $ch = curl_init($url);
   curl_setopt_array($ch, [
@@ -179,7 +224,7 @@ if ($timed_out) {
   $res   = curl_exec($ch);
   $err   = curl_error($ch);
   $errno = curl_errno($ch);
-  $code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  $code  = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
 }
 
 $tt = microtime(true) - $t0;
@@ -190,7 +235,7 @@ log_meta_graph("RESP http={$code} errno={$errno} err=" . ($err ?: '-') .
 
 curl_close($ch);
 
-// meta_json всегда определён
+// parse response
 $meta_json = null;
 if (is_string($res) && $res !== '') {
   $tmp = json_decode($res, true);
@@ -213,6 +258,5 @@ if ($code < 200 || $code >= 300 || (is_array($meta_json) && isset($meta_json['er
 j(200, [
   'ok' => true,
   'meta_http' => $code,
-  'meta_body' => $res,
-  'meta_json' => $meta_json
+  'meta_json' => $meta_json,
 ]);

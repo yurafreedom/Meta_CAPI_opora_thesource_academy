@@ -2,6 +2,26 @@
 // index.php (collect.php) — принимает GET (image beacon) и сохраняет lead в Upstash
 header("Access-Control-Allow-Origin: *");
 
+// --- CORS + preflight (по желанию, но нормально) ---
+header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type");
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { http_response_code(204); exit; }
+
+// --- input: GET + POST + raw body ---
+$IN = $_GET;
+
+if (!empty($_POST)) {
+  $IN = array_merge($IN, $_POST);
+} else {
+  // sendBeacon может прилететь как text/plain, тогда $_POST пустой
+  $raw = file_get_contents('php://input');
+  if (is_string($raw) && $raw !== '') {
+    $tmp = [];
+    parse_str($raw, $tmp); // ожидаем form-urlencoded
+    if (is_array($tmp) && !empty($tmp)) $IN = array_merge($IN, $tmp);
+  }
+}
+
 function out($code, $arr){
   http_response_code($code);
   header('Content-Type: application/json; charset=utf-8');
@@ -121,16 +141,16 @@ function merge_keep_first_nonempty(array $old, array $new, array $keepFirstKeys)
 }
 
 // -------- input --------
-$token = s($_GET['token'] ?? '', 120);
+$token = s($IN['token'] ?? '', 120);
 
 // healthcheck
 if ($token === '') {
   out(200, ['ok'=>true, 'service'=>'alive', 'hint'=>'pass ?token=... (&ph_sha256=... optional)']);
 }
 
-$ph_sha256 = strtolower(s($_GET['ph_sha256'] ?? '', 80));
-$fbp = s($_GET['fbp'] ?? '', 220);
-$fbc = s($_GET['fbc'] ?? '', 220);
+$ph_sha256 = strtolower(s($IN['ph_sha256'] ?? '', 80));
+$fbp = s($IN['fbp'] ?? '', 220);
+$fbc = s($IN['fbc'] ?? '', 220);
 
 $record = [
   'token' => $token,
@@ -144,18 +164,18 @@ $record = [
   'ip' => ip_from_headers(),
   'ua' => s($_SERVER['HTTP_USER_AGENT'] ?? '', 400),
 
-  'ts' => (int)($_GET['ts'] ?? (time()*1000)),
+  'ts' => (int)($IN['ts'] ?? (time()*1000)),
   'ts_server' => time(),
-  'reason' => s($_GET['r'] ?? 'collect', 80),
+  'reason' => s($IN['r'] ?? 'collect', 80),
 
-  'page_url' => s($_GET['u'] ?? '', 800),
-  'referrer' => s($_GET['ref'] ?? '', 800),
-  'name' => s($_GET['name'] ?? '', 120),
+  'page_url' => s($IN['u'] ?? '', 800),
+  'referrer' => s($IN['ref'] ?? '', 800),
+  'name' => s($IN['name'] ?? '', 120),
 
-  'utm_source' => s($_GET['utm_source'] ?? '', 120),
-  'utm_campaign' => s($_GET['utm_campaign'] ?? '', 200),
-  'utm_term' => s($_GET['utm_term'] ?? '', 200),
-  'utm_content' => s($_GET['utm_content'] ?? '', 200),
+  'utm_source' => s($IN['utm_source'] ?? '', 120),
+  'utm_campaign' => s($IN['utm_campaign'] ?? '', 200),
+  'utm_term' => s($IN['utm_term'] ?? '', 200),
+  'utm_content' => s($IN['utm_content'] ?? '', 200),
 ];
 
 // убираем пустые строки, чтобы merge был чище

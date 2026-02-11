@@ -223,6 +223,28 @@ if ($token !== 'missing') {
   $lead = $leadJson ? json_decode($leadJson, true) : null;
 }
 
+// после: $lead = $leadJson ? json_decode($leadJson, true) : null;
+
+function unwrap_lead($lead) {
+  // если lead — это строка JSON
+  if (is_string($lead)) {
+    $x = json_decode($lead, true);
+    return is_array($x) ? unwrap_lead($x) : null;
+  }
+
+  if (!is_array($lead)) return null;
+
+  // классический мусор: ["0" => "....json...."]
+  if (isset($lead['0']) && is_string($lead['0'])) {
+    $x = json_decode($lead['0'], true);
+    if (is_array($x)) return unwrap_lead($x);
+  }
+
+  return $lead;
+}
+
+$lead = unwrap_lead($lead);
+
 @file_put_contents(__DIR__ . '/meta_graph.log',
   date('c')
   . " DEBUG leadJson_len=" . strlen((string)$leadJson)
@@ -286,6 +308,30 @@ $external_id_sha = ($token && $token !== 'missing')
   : hash('sha256', $order_id);
 
 $ph_sha = $ph; // уже провалидирован выше
+
+function norm_name($s){
+  $s = mb_strtolower(trim((string)$s));
+  // оставим только буквы/пробел/дефис
+  $s = preg_replace('~[^\p{L}\s\-]+~u', '', $s);
+  $s = preg_replace('~\s+~u', ' ', $s);
+  return $s;
+}
+
+$name_raw = is_array($lead) ? ($lead['name'] ?? '') : '';
+$name_raw = norm_name($name_raw);
+
+$fn = '';
+$ln = '';
+if ($name_raw !== '') {
+  $parts = preg_split('~\s+~u', $name_raw);
+  $fn = $parts[0] ?? '';
+  if (count($parts) > 1) $ln = end($parts);
+}
+
+if ($fn !== '') $user_data['fn'] = [ hash('sha256', $fn) ];
+if ($ln !== '') $user_data['ln'] = [ hash('sha256', $ln) ];
+
+log_meta_graph("NAME fn=" . ($fn? '1':'0') . " ln=" . ($ln? '1':'0') . " raw=" . substr($name_raw,0,40));
 
 $user_data = array_filter([
   // ✅ phone hash (самое важное)
