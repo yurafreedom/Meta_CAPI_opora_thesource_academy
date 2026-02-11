@@ -447,4 +447,20 @@ if ($err || $code < 200 || $code >= 300) {
   ok_json(['error' => 'meta failed', 'http' => $code, 'errno' => $errno, 'err' => $err, 'body' => substr((string)$res, 0, 800)]);
 }
 
-ok_json(['ok' => true]);
+function wfp_accept_response(string $order_id, string $secret) {
+  $time = time();
+  $status = 'accept';
+  $signStr = $order_id . ';' . $status . ';' . $time;
+  $sig = hash_hmac('md5', $signStr, $secret);
+
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode([
+    'orderReference' => $order_id,
+    'status' => $status,
+    'time' => $time,
+    'signature' => $sig,
+  ], JSON_UNESCAPED_UNICODE);
+  exit;
+}
+
+wfp_accept_response($order_id, $secret);

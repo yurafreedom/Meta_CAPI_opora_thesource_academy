@@ -76,6 +76,10 @@ if ($token === '' || strlen($token) > 120 || strpos($token, '{') !== false || st
   exit('Token missing/bad');
 }
 
+// $amount_raw = envv('PRICE_UAH', '290');
+// $amount     = (float)$amount_raw;
+// $amount_str = fmt_money($amount); // "290.00"
+
 $amount_raw = envv('PRICE_UAH', '1');               // тест = 1 грн через ENV
 $amount     = (float)$amount_raw;
 
@@ -98,7 +102,7 @@ $returnBase = rtrim(envv('RETURN_URL', 'https://metacapioporathesourceacademy-pr
 
 $webhookUrl = envv('WEBHOOK_URL', 'https://metacapioporathesourceacademy-production.up.railway.app/wfp-webhook.php');
 
-$productName  = ['Opora course'];
+$productName  = ['Оплата «Я-Моя Опора»'];
 $productCount = [1];
 $productPrice = [$amount_str];
 
