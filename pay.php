@@ -76,12 +76,12 @@ if ($token === '' || strlen($token) > 120 || strpos($token, '{') !== false || st
   exit('Token missing/bad');
 }
 
-// $amount_raw = envv('PRICE_UAH', '290');
-// $amount     = (float)$amount_raw;
-// $amount_str = fmt_money($amount); // "290.00"
-
-$amount_raw = envv('PRICE_UAH', '1');               // тест = 1 грн через ENV
+$amount_raw = envv('PRICE_UAH', '290');
 $amount     = (float)$amount_raw;
+$amount_str = fmt_money($amount); // "290.00"
+
+// $amount_raw = envv('PRICE_UAH', '1');               // тест = 1 грн через ENV
+// $amount     = (float)$amount_raw;
 
 if ($amount < 1 || $amount > 100000) {
   http_response_code(400);

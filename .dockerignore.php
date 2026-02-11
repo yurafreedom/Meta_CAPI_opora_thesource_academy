@@ -1,0 +1,14 @@
+.git
+.github
+node_modules
+vendor
+storage
+tmp
+cache
+*.log
+*.sql
+*.zip
+*.tar
+*.gz
+.DS_Store
+.env
