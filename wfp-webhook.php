@@ -310,11 +310,11 @@ $external_id_sha = ($token && $token !== 'missing')
 $ph_sha = $ph; // уже провалидирован выше
 
 function norm_name($s){
-  $s = mb_strtolower(trim((string)$s));
-  // оставим только буквы/пробел/дефис
+  $s = trim((string)$s);
+  $s = mb_strtolower($s, 'UTF-8');
   $s = preg_replace('~[^\p{L}\s\-]+~u', '', $s);
   $s = preg_replace('~\s+~u', ' ', $s);
-  return $s;
+  return trim($s);
 }
 
 $name_raw = is_array($lead) ? ($lead['name'] ?? '') : '';
@@ -328,19 +328,16 @@ if ($name_raw !== '') {
   if (count($parts) > 1) $ln = end($parts);
 }
 
-if ($fn !== '') $user_data['fn'] = [ hash('sha256', $fn) ];
-if ($ln !== '') $user_data['ln'] = [ hash('sha256', $ln) ];
-
 log_meta_graph("NAME fn=" . ($fn? '1':'0') . " ln=" . ($ln? '1':'0') . " raw=" . substr($name_raw,0,40));
 
 $user_data = array_filter([
-  // ✅ phone hash (самое важное)
   'ph' => ($ph_sha !== '' ? [ $ph_sha ] : null),
-
-  // ✅ external_id (sha256)
   'external_id' => [ $external_id_sha ],
 
-  // ✅ fbp/fbc + ip/ua
+  // имя (если хочешь)
+  'fn' => ($fn !== '' ? [ hash('sha256', $fn) ] : null),
+  'ln' => ($ln !== '' ? [ hash('sha256', $ln) ] : null),
+
   'fbp' => (is_array($lead) ? ($lead['fbp'] ?? null) : null),
   'fbc' => (is_array($lead) ? ($lead['fbc'] ?? null) : null),
   'client_ip_address' => (is_array($lead) ? ($lead['ip'] ?? null) : null),
@@ -352,11 +349,14 @@ $user_data = array_filter([
   return true;
 });
 
-// ✅ чтобы в логах видеть, был ли phone hash в lead
-log_meta_graph(
-  "USERDATA order={$order_id} token={$token} has_ph=" . (isset($user_data['ph']) ? '1' : '0') .
-  " has_fbp=" . (isset($user_data['fbp']) ? '1' : '0') .
-  " has_fbc=" . (isset($user_data['fbc']) ? '1' : '0')
+// ✅ ВОТ СЮДА ВСТАВИТЬ (сразу после сборки user_data)
+log_meta_graph("UD flags ph=".(isset($user_data['ph'])?'1':'0').
+  " em=".(isset($user_data['em'])?'1':'0').
+  " fbp=".(!empty($user_data['fbp'])?'1':'0').
+  " fbc=".(!empty($user_data['fbc'])?'1':'0').
+  " fn=".(isset($user_data['fn'])?'1':'0').
+  " ln=".(isset($user_data['ln'])?'1':'0').
+  " ext=".(isset($user_data['external_id'])?'1':'0')
 );
 
 $event = array_filter([
@@ -383,12 +383,13 @@ if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
 $url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
 $safeUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
 
-$did_retry = 0;
-
 log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
   " event_name=" . ($event['event_name'] ?? 'NULL') .
   " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
   " url={$safeUrl}");
+
+$did_retry = 0;
+$t0 = microtime(true);
 
 $ch = curl_init($url);
 curl_setopt_array($ch, [
@@ -396,26 +397,23 @@ curl_setopt_array($ch, [
   CURLOPT_RETURNTRANSFER => true,
   CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
   CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
-
-  // чтобы не зависало и не превращалось в 499/502
   CURLOPT_CONNECTTIMEOUT => 3,
   CURLOPT_TIMEOUT => 8,
 ]);
 
-$res = curl_exec($ch);
-$err = curl_error($ch);
+$res   = curl_exec($ch);
+$err   = curl_error($ch);
 $errno = curl_errno($ch);
-$code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$tt = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+$code  = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
 $timed_out = ($errno === 28) || (($code === 0) && $err && stripos($err, 'timed out') !== false);
 
 if ($timed_out) {
   $did_retry = 1;
-  log_meta_graph("RETRY after timeout...");
+  log_meta_graph("RETRY after timeout errno={$errno} ...");
 
   curl_close($ch);
-  usleep(200000); // 200ms
+  usleep(200000);
 
   $ch = curl_init($url);
   curl_setopt_array($ch, [
@@ -427,15 +425,18 @@ if ($timed_out) {
     CURLOPT_TIMEOUT => 8,
   ]);
 
-  $res = curl_exec($ch);
-  $err = curl_error($ch);
+  $res   = curl_exec($ch);
+  $err   = curl_error($ch);
   $errno = curl_errno($ch);
-  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  $tt = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+  $code  = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
 }
 
+$tt = microtime(true) - $t0;
+
 log_meta_graph("RESP http={$code} errno={$errno} err=" . ($err ?: '-') .
-  " t={$tt} retry={$did_retry} body=" . substr((string)$res, 0, 800));
+  " t=" . sprintf('%.3f', $tt) .
+  " retry={$did_retry} body=" . substr((string)$res, 0, 800)
+);
 
 curl_close($ch);
 

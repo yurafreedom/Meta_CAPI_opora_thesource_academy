@@ -186,10 +186,22 @@ log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
   " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
   " url={$safeUrl}");
 
-$did_retry = 0;
 $t0 = microtime(true);
 
+// 🔍 DEBUG: что реально уходит в Meta
+log_meta_graph("USER_DATA " . json_encode($user_data, JSON_UNESCAPED_UNICODE));
+log_meta_graph("EVENT " . json_encode($event, JSON_UNESCAPED_UNICODE));
+
+log_meta_graph("UD flags ph=".(isset($user_data['ph'])?'1':'0').
+  " em=".(isset($user_data['em'])?'1':'0').
+  " fbp=".(!empty($user_data['fbp'])?'1':'0').
+  " fbc=".(!empty($user_data['fbc'])?'1':'0').
+  " fn=".(isset($user_data['fn'])?'1':'0').
+  " ext=".(isset($user_data['external_id'])?'1':'0')
+);
+
 $ch = curl_init($url);
+
 curl_setopt_array($ch, [
   CURLOPT_POST => true,
   CURLOPT_RETURNTRANSFER => true,
