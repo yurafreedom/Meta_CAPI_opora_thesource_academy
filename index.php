@@ -34,23 +34,38 @@ function upstash_request($path, $method = 'GET', $jsonBody = null){
   $token = getenv('UPSTASH_REDIS_REST_TOKEN');
   if (!$url || !$token) return [0, 'missing_upstash_env'];
 
-  $ch = curl_init(rtrim($url, '/') . $path);
-  curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-  curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    'Authorization: Bearer ' . $token,
-    'Content-Type: application/json'
-  ]);
+  $fullUrl = rtrim($url, '/') . $path;
+  $attempt = 0;
+  $maxAttempts = 2; // 1 retry on timeout
 
-  if ($method === 'POST') {
-    curl_setopt($ch, CURLOPT_POST, true);
-    if ($jsonBody !== null) {
-      curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($jsonBody, JSON_UNESCAPED_UNICODE));
+  while (++$attempt <= $maxAttempts) {
+    $ch = curl_init($fullUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2); // H3 FIX
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);         // H3 FIX
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+      'Authorization: Bearer ' . $token,
+      'Content-Type: application/json'
+    ]);
+
+    if ($method === 'POST') {
+      curl_setopt($ch, CURLOPT_POST, true);
+      if ($jsonBody !== null) {
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($jsonBody, JSON_UNESCAPED_UNICODE));
+      }
     }
-  }
 
-  $resp = curl_exec($ch);
-  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  curl_close($ch);
+    $resp  = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($errno === 28 && $attempt < $maxAttempts) {
+      usleep(200000); // 200ms backoff before retry
+      continue;
+    }
+    break;
+  }
 
   return [$code, $resp];
 }
@@ -201,13 +216,23 @@ list($code1, $resp1) = upstash_set_json($leadKey, $merged, 60*60*24*14);
 // 3) events log (опционально)
 list($code2, $resp2) = upstash_lpush_json('leads_events', $record);
 
-out(200, [
+// H6 FIX: never leak raw Upstash responses to clients
+$response = [
   'ok' => true,
   'saved' => ($code1 >= 200 && $code1 < 300),
   'token' => $token,
   'has_ph' => isset($merged['ph_sha256']) ? true : false,
   'has_fbp' => isset($merged['fbp']) ? true : false,
   'has_fbc' => isset($merged['fbc']) ? true : false,
-  'set' => [$code1, $resp1],
-  'lpush' => [$code2, $resp2],
-]);
+];
+
+// Debug details only when explicitly enabled and authenticated
+$debugSecret = getenv('DEBUG_SECRET') ?: '';
+if ($debugSecret !== '' && ($IN['key'] ?? '') === $debugSecret && getenv('DEBUG') === '1') {
+  $response['_debug'] = [
+    'set' => [$code1, $resp1],
+    'lpush' => [$code2, $resp2],
+  ];
+}
+
+out(200, $response);

@@ -21,19 +21,34 @@ function upstash_cmd(array $cmd) {
   $token = envv('UPSTASH_REDIS_REST_TOKEN');
   if (!$url || !$token) return;
 
-  $ch = curl_init(rtrim($url, '/') . '/pipeline');
-  curl_setopt_array($ch, [
-    CURLOPT_POST => true,
-    CURLOPT_HTTPHEADER => [
-      'Authorization: Bearer ' . $token,
-      'Content-Type: application/json',
-    ],
-    CURLOPT_POSTFIELDS => json_encode([ $cmd ], JSON_UNESCAPED_UNICODE),
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_TIMEOUT => 3,
-  ]);
-  curl_exec($ch);
-  curl_close($ch);
+  $fullUrl = rtrim($url, '/') . '/pipeline';
+  $payload = json_encode([ $cmd ], JSON_UNESCAPED_UNICODE);
+  $attempt = 0;
+  $maxAttempts = 2;
+
+  while (++$attempt <= $maxAttempts) {
+    $ch = curl_init($fullUrl);
+    curl_setopt_array($ch, [
+      CURLOPT_POST => true,
+      CURLOPT_HTTPHEADER => [
+        'Authorization: Bearer ' . $token,
+        'Content-Type: application/json',
+      ],
+      CURLOPT_POSTFIELDS => $payload,
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_CONNECTTIMEOUT => 2, // H3 FIX
+      CURLOPT_TIMEOUT => 5,       // H3 FIX
+    ]);
+    curl_exec($ch);
+    $errno = curl_errno($ch);
+    curl_close($ch);
+
+    if ($errno === 28 && $attempt < $maxAttempts) {
+      usleep(200000);
+      continue;
+    }
+    break;
+  }
 }
 
 function s($v, $max = 500) {

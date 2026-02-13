@@ -15,6 +15,8 @@ function upstash_request($path){
 
   $ch = curl_init(rtrim($url, '/') . $path);
   curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+  curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2); // H3 FIX
+  curl_setopt($ch, CURLOPT_TIMEOUT, 5);         // H3 FIX
   curl_setopt($ch, CURLOPT_HTTPHEADER, [
     'Authorization: Bearer ' . $token,
     'Content-Type: application/json'

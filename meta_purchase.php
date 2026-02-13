@@ -178,17 +178,19 @@ $bodyArr = ['data' => [$event]];
 if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
 
 // --- request ---
-$url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
-$safeUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
+// C2 FIX: token via Authorization header, not query string
+$metaUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
+$metaPayload = json_encode($bodyArr, JSON_UNESCAPED_UNICODE);
 
 log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
   " event_name=" . ($event['event_name'] ?? 'NULL') .
   " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
-  " url={$safeUrl}");
+  " url={$metaUrl}");
+
+$did_retry = 0; // H2 FIX: initialize before use
 
 $t0 = microtime(true);
 
-// 🔍 DEBUG: что реально уходит в Meta
 log_meta_graph("USER_DATA " . json_encode($user_data, JSON_UNESCAPED_UNICODE));
 log_meta_graph("EVENT " . json_encode($event, JSON_UNESCAPED_UNICODE));
 
@@ -200,43 +202,48 @@ log_meta_graph("UD flags ph=".(isset($user_data['ph'])?'1':'0').
   " ext=".(isset($user_data['external_id'])?'1':'0')
 );
 
-$ch = curl_init($url);
-
-curl_setopt_array($ch, [
-  CURLOPT_POST => true,
-  CURLOPT_RETURNTRANSFER => true,
-  CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-  CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
-  CURLOPT_CONNECTTIMEOUT => 3,
-  CURLOPT_TIMEOUT => 12,
-]);
-
-$res   = curl_exec($ch);
-$err   = curl_error($ch);
-$errno = curl_errno($ch);
-$code  = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-if ($errno === 28) { // timeout
-  $did_retry = 1;
-  log_meta_graph("RETRY after timeout errno=28 ...");
-
-  curl_close($ch);
-  usleep(200000);
-
-  $ch = curl_init($url);
+// Helper: execute Meta CAPI request
+$_meta_do_request = function(string $reqUrl, array $headers, string $payload) {
+  $ch = curl_init($reqUrl);
   curl_setopt_array($ch, [
     CURLOPT_POST => true,
     CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-    CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
+    CURLOPT_HTTPHEADER => $headers,
+    CURLOPT_POSTFIELDS => $payload,
     CURLOPT_CONNECTTIMEOUT => 3,
-    CURLOPT_TIMEOUT => 8,
+    CURLOPT_TIMEOUT => 12,
   ]);
-
   $res   = curl_exec($ch);
   $err   = curl_error($ch);
   $errno = curl_errno($ch);
   $code  = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+  return [$res, $err, $errno, $code];
+};
+
+$metaHeaders = [
+  'Content-Type: application/json',
+  'Authorization: Bearer ' . $ACCESS_TOKEN,
+];
+
+list($res, $err, $errno, $code) = $_meta_do_request($metaUrl, $metaHeaders, $metaPayload);
+
+// TODO(remove after 2025-08-01): Fallback to query-string token if Bearer returns 401/403
+// Enable via META_TOKEN_QUERY_FALLBACK=1 in env during migration period
+if (in_array($code, [401, 403], true) && (getenv('META_TOKEN_QUERY_FALLBACK') ?: '0') === '1') {
+  log_meta_graph("FALLBACK query-string token after http={$code}");
+  $fallbackUrl = $metaUrl . '?access_token=' . urlencode($ACCESS_TOKEN);
+  $fallbackHeaders = ['Content-Type: application/json'];
+  list($res, $err, $errno, $code) = $_meta_do_request($fallbackUrl, $fallbackHeaders, $metaPayload);
+  $did_retry = 1;
+}
+
+// Retry on timeout
+if ($errno === 28) {
+  $did_retry = 1;
+  log_meta_graph("RETRY after timeout errno=28 ...");
+  usleep(200000);
+  list($res, $err, $errno, $code) = $_meta_do_request($metaUrl, $metaHeaders, $metaPayload);
 }
 
 $tt = microtime(true) - $t0;
@@ -244,8 +251,6 @@ $tt = microtime(true) - $t0;
 log_meta_graph("RESP http={$code} errno={$errno} err=" . ($err ?: '-') .
   " t=" . sprintf('%.3f', $tt) .
   " retry={$did_retry} body=" . substr((string)$res, 0, 1500));
-
-curl_close($ch);
 
 // parse response
 $meta_json = null;

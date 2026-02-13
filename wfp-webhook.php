@@ -28,22 +28,37 @@ function upstash_cmd(array $cmd) {
   $token = envv('UPSTASH_REDIS_REST_TOKEN');
   if (!$url || !$token) { throw new Exception("Upstash env missing"); }
 
-  $ch = curl_init(rtrim($url, '/') . '/pipeline');
-  curl_setopt_array($ch, [
-    CURLOPT_POST => true,
-    CURLOPT_HTTPHEADER => [
-      'Authorization: Bearer ' . $token,
-      'Content-Type: application/json',
-    ],
-    CURLOPT_POSTFIELDS => json_encode([$cmd], JSON_UNESCAPED_UNICODE),
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_TIMEOUT => 8,
-  ]);
+  $fullUrl = rtrim($url, '/') . '/pipeline';
+  $payload = json_encode([$cmd], JSON_UNESCAPED_UNICODE);
+  $attempt = 0;
+  $maxAttempts = 2;
 
-  $res  = curl_exec($ch);
-  $err  = curl_error($ch);
-  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  curl_close($ch);
+  while (++$attempt <= $maxAttempts) {
+    $ch = curl_init($fullUrl);
+    curl_setopt_array($ch, [
+      CURLOPT_POST => true,
+      CURLOPT_HTTPHEADER => [
+        'Authorization: Bearer ' . $token,
+        'Content-Type: application/json',
+      ],
+      CURLOPT_POSTFIELDS => $payload,
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_CONNECTTIMEOUT => 2, // H3 FIX
+      CURLOPT_TIMEOUT => 5,       // H3 FIX
+    ]);
+
+    $res   = curl_exec($ch);
+    $err   = curl_error($ch);
+    $errno = curl_errno($ch);
+    $code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($errno === 28 && $attempt < $maxAttempts) {
+      usleep(200000); // 200ms backoff
+      continue;
+    }
+    break;
+  }
 
   if ($res === false) throw new Exception("Upstash curl error: $err");
   if ($code < 200 || $code >= 300) throw new Exception("Upstash HTTP $code: $res");
@@ -380,55 +395,62 @@ $event = array_filter([
 $bodyArr = ['data' => [$event]];
 if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
 
-$url = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events?access_token=" . urlencode($ACCESS_TOKEN);
-$safeUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
+// C2 FIX: token via Authorization header, not query string
+$metaUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
+$metaPayload = json_encode($bodyArr, JSON_UNESCAPED_UNICODE);
 
 log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
   " event_name=" . ($event['event_name'] ?? 'NULL') .
   " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
-  " url={$safeUrl}");
+  " url={$metaUrl}");
 
 $did_retry = 0;
 $t0 = microtime(true);
 
-$ch = curl_init($url);
-curl_setopt_array($ch, [
-  CURLOPT_POST => true,
-  CURLOPT_RETURNTRANSFER => true,
-  CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-  CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
-  CURLOPT_CONNECTTIMEOUT => 3,
-  CURLOPT_TIMEOUT => 8,
-]);
-
-$res   = curl_exec($ch);
-$err   = curl_error($ch);
-$errno = curl_errno($ch);
-$code  = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-$timed_out = ($errno === 28) || (($code === 0) && $err && stripos($err, 'timed out') !== false);
-
-if ($timed_out) {
-  $did_retry = 1;
-  log_meta_graph("RETRY after timeout errno={$errno} ...");
-
-  curl_close($ch);
-  usleep(200000);
-
-  $ch = curl_init($url);
+// Helper: execute Meta CAPI request with Bearer auth
+// Returns [$res, $err, $errno, $code]
+$_meta_do_request = function(string $reqUrl, array $headers, string $payload) {
+  $ch = curl_init($reqUrl);
   curl_setopt_array($ch, [
     CURLOPT_POST => true,
     CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-    CURLOPT_POSTFIELDS => json_encode($bodyArr, JSON_UNESCAPED_UNICODE),
+    CURLOPT_HTTPHEADER => $headers,
+    CURLOPT_POSTFIELDS => $payload,
     CURLOPT_CONNECTTIMEOUT => 3,
     CURLOPT_TIMEOUT => 8,
   ]);
-
   $res   = curl_exec($ch);
   $err   = curl_error($ch);
   $errno = curl_errno($ch);
   $code  = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+  return [$res, $err, $errno, $code];
+};
+
+$metaHeaders = [
+  'Content-Type: application/json',
+  'Authorization: Bearer ' . $ACCESS_TOKEN,
+];
+
+list($res, $err, $errno, $code) = $_meta_do_request($metaUrl, $metaHeaders, $metaPayload);
+
+// TODO(remove after 2025-08-01): Fallback to query-string token if Bearer returns 401/403
+// Enable via META_TOKEN_QUERY_FALLBACK=1 in env during migration period
+if (in_array($code, [401, 403], true) && envv('META_TOKEN_QUERY_FALLBACK') === '1') {
+  log_meta_graph("FALLBACK query-string token after http={$code}");
+  $fallbackUrl = $metaUrl . '?access_token=' . urlencode($ACCESS_TOKEN);
+  $fallbackHeaders = ['Content-Type: application/json'];
+  list($res, $err, $errno, $code) = $_meta_do_request($fallbackUrl, $fallbackHeaders, $metaPayload);
+  $did_retry = 1;
+}
+
+// Retry on timeout
+$timed_out = ($errno === 28) || (($code === 0) && $err && stripos($err, 'timed out') !== false);
+if ($timed_out) {
+  $did_retry = 1;
+  log_meta_graph("RETRY after timeout errno={$errno} ...");
+  usleep(200000);
+  list($res, $err, $errno, $code) = $_meta_do_request($metaUrl, $metaHeaders, $metaPayload);
 }
 
 $tt = microtime(true) - $t0;
@@ -437,8 +459,6 @@ log_meta_graph("RESP http={$code} errno={$errno} err=" . ($err ?: '-') .
   " t=" . sprintf('%.3f', $tt) .
   " retry={$did_retry} body=" . substr((string)$res, 0, 800)
 );
-
-curl_close($ch);
 
 // если Meta не принял — удаляем dedupeKey, чтобы WFP мог повторить вебхук
 if ($err || $code < 200 || $code >= 300) {

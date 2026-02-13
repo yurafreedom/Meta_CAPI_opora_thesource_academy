@@ -6,29 +6,52 @@ function envv($k, $default = '') {
   return ($v !== false && $v !== '') ? $v : $default;
 }
 
+function _upstash_exec(string $fullUrl, string $token, string $payload) {
+  $attempt = 0;
+  $maxAttempts = 2;
+
+  while (++$attempt <= $maxAttempts) {
+    $ch = curl_init($fullUrl);
+    curl_setopt_array($ch, [
+      CURLOPT_POST => true,
+      CURLOPT_HTTPHEADER => [
+        'Authorization: Bearer ' . $token,
+        'Content-Type: application/json',
+      ],
+      CURLOPT_POSTFIELDS => $payload,
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_CONNECTTIMEOUT => 2, // H3 FIX
+      CURLOPT_TIMEOUT => 5,       // H3 FIX
+    ]);
+    $res   = curl_exec($ch);
+    $err   = curl_error($ch);
+    $errno = curl_errno($ch);
+    $code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($errno === 28 && $attempt < $maxAttempts) {
+      usleep(200000);
+      continue;
+    }
+    break;
+  }
+
+  if ($res === false) throw new Exception("Upstash curl error: $err");
+  if ($code < 200 || $code >= 300) throw new Exception("Upstash HTTP $code: $res");
+
+  return $res;
+}
+
 function upstash_cmd(array $cmd) {
   $url = envv('UPSTASH_REDIS_REST_URL');
   $token = envv('UPSTASH_REDIS_REST_TOKEN');
   if (!$url || !$token) { throw new Exception("Upstash env missing"); }
 
-  $ch = curl_init(rtrim($url, '/') . '/pipeline');
-  curl_setopt_array($ch, [
-    CURLOPT_POST => true,
-    CURLOPT_HTTPHEADER => [
-      'Authorization: Bearer ' . $token,
-      'Content-Type: application/json',
-    ],
-    CURLOPT_POSTFIELDS => json_encode([$cmd], JSON_UNESCAPED_UNICODE),
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_TIMEOUT => 8,
-  ]);
-  $res = curl_exec($ch);
-  $err = curl_error($ch);
-  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  curl_close($ch);
-
-  if ($res === false) throw new Exception("Upstash curl error: $err");
-  if ($code < 200 || $code >= 300) throw new Exception("Upstash HTTP $code: $res");
+  $res = _upstash_exec(
+    rtrim($url, '/') . '/pipeline',
+    $token,
+    json_encode([$cmd], JSON_UNESCAPED_UNICODE)
+  );
 
   $j = json_decode($res, true);
   return $j[0]['result'] ?? null;
@@ -39,24 +62,11 @@ function upstash_pipeline(array $cmds) {
   $token = envv('UPSTASH_REDIS_REST_TOKEN');
   if (!$url || !$token) { throw new Exception("Upstash env missing"); }
 
-  $ch = curl_init(rtrim($url, '/') . '/pipeline');
-  curl_setopt_array($ch, [
-    CURLOPT_POST => true,
-    CURLOPT_HTTPHEADER => [
-      'Authorization: Bearer ' . $token,
-      'Content-Type: application/json',
-    ],
-    CURLOPT_POSTFIELDS => json_encode($cmds, JSON_UNESCAPED_UNICODE),
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_TIMEOUT => 8,
-  ]);
-  $res = curl_exec($ch);
-  $err = curl_error($ch);
-  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  curl_close($ch);
-
-  if ($res === false) throw new Exception("Upstash curl error: $err");
-  if ($code < 200 || $code >= 300) throw new Exception("Upstash HTTP $code: $res");
+  $res = _upstash_exec(
+    rtrim($url, '/') . '/pipeline',
+    $token,
+    json_encode($cmds, JSON_UNESCAPED_UNICODE)
+  );
 
   $decoded = json_decode($res, true);
   if (!is_array($decoded)) throw new Exception("Upstash bad JSON: $res");
