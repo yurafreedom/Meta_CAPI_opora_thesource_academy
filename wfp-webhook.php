@@ -1,22 +1,18 @@
 <?php
 // wfp-webhook.php
 
-@file_put_contents(__DIR__ . '/meta_graph.log', date('c')." WEBHOOK_HIT\n", FILE_APPEND);
-file_put_contents(__DIR__.'/parse_check.log', date('c')." HIT\n", FILE_APPEND);
+// Generate a request ID for log correlation
+$_rid = substr(bin2hex(random_bytes(4)), 0, 8);
+
+function _log(string $msg) {
+  global $_rid;
+  error_log("[wfp-webhook rid={$_rid}] {$msg}");
+}
+
+_log("HIT method=" . ($_SERVER['REQUEST_METHOD'] ?? '') . " ct=" . ($_SERVER['CONTENT_TYPE'] ?? ''));
 
 $raw = file_get_contents('php://input') ?: '';
 $ct  = $_SERVER['CONTENT_TYPE'] ?? '';
-
-file_put_contents(
-  __DIR__.'/webhook.log',
-  date('c')
-  ." METHOD=".$_SERVER['REQUEST_METHOD']
-  ." CT=".$ct
-  ." POST=".json_encode($_POST, JSON_UNESCAPED_UNICODE)
-  ." RAW=".substr($raw, 0, 5000)
-  ."\n",
-  FILE_APPEND
-);
 
 function envv($k, $default = '') {
   $v = getenv($k);
@@ -43,8 +39,8 @@ function upstash_cmd(array $cmd) {
       ],
       CURLOPT_POSTFIELDS => $payload,
       CURLOPT_RETURNTRANSFER => true,
-      CURLOPT_CONNECTTIMEOUT => 2, // H3 FIX
-      CURLOPT_TIMEOUT => 5,       // H3 FIX
+      CURLOPT_CONNECTTIMEOUT => 2,
+      CURLOPT_TIMEOUT => 5,
     ]);
 
     $res   = curl_exec($ch);
@@ -54,7 +50,7 @@ function upstash_cmd(array $cmd) {
     curl_close($ch);
 
     if ($errno === 28 && $attempt < $maxAttempts) {
-      usleep(200000); // 200ms backoff
+      usleep(200000);
       continue;
     }
     break;
@@ -73,12 +69,10 @@ function ok_json($arr = []) {
   exit;
 }
 
-// 1) читаем вход
+// 1) Parse input
 $data = null;
 
-/**
- * A. сначала пробуем JSON из RAW
- */
+// A. JSON from raw body
 if ($raw !== '') {
   $j = json_decode($raw, true);
   if (is_array($j)) {
@@ -86,11 +80,7 @@ if ($raw !== '') {
   }
 }
 
-/**
- * B. кейс WayForPay:
- * application/x-www-form-urlencoded
- * где ВЕСЬ JSON лежит в имени единственного поля
- */
+// B. WayForPay quirk: entire JSON as the key of a single POST field
 if (!is_array($data) && !empty($_POST) && count($_POST) === 1) {
   $k = array_key_first($_POST);
   $v = $_POST[$k];
@@ -108,16 +98,12 @@ if (!is_array($data) && !empty($_POST) && count($_POST) === 1) {
   }
 }
 
-/**
- * C. обычный form POST
- */
+// C. Normal form POST
 if (!is_array($data) && !empty($_POST)) {
   $data = $_POST;
 }
 
-/**
- * D. крайний fallback — parse_str из RAW
- */
+// D. Fallback: parse_str from raw
 if (!is_array($data) && $raw !== '') {
   $tmp = [];
   parse_str($raw, $tmp);
@@ -131,38 +117,19 @@ if (!is_array($data)) {
   ok_json(['error' => 'bad payload']);
 }
 
-file_put_contents(__DIR__.'/parse_check.log',
-  date('c')." keys=".implode(',', array_keys($data))." orderReference=".($data['orderReference'] ?? 'NULL')."\n",
-  FILE_APPEND
-);
-
-// ✅ ЛОГ (временно) — после того как $data уже распарсен
+// Sanitized log (no card/signature/PII)
 $log = $data;
-unset(
-  $log['cardPan'],
-  $log['card_pan'],
-  $log['merchantSignature'],
-  $log['signature'],
-  $log['email'],
-  $log['phone']
-);
-file_put_contents(__DIR__.'/wfp.log', date('c')." CT=".$ct." ".json_encode($log, JSON_UNESCAPED_UNICODE).PHP_EOL, FILE_APPEND);
+unset($log['cardPan'], $log['card_pan'], $log['merchantSignature'], $log['signature'], $log['email'], $log['phone']);
+_log("PARSED keys=" . implode(',', array_keys($data)) . " orderReference=" . ($data['orderReference'] ?? 'NULL'));
 
-// 2) забираем базовые поля
+// 2) Extract basic fields
 $order_id = $data['orderReference'] ?? $data['order_reference'] ?? '';
 $status   = $data['transactionStatus'] ?? $data['status'] ?? '';
 $signature= $data['merchantSignature'] ?? $data['signature'] ?? '';
 
 if ($order_id === '') { http_response_code(400); ok_json(['error' => 'orderReference missing']); }
 
-// 3) Проверка подписи (ВАЖНО: порядок полей должен совпасть со спецификацией WFP callback)
-//
-// Ниже — типовой вариант для many callbacks WFP:
-// merchantAccount; orderReference; amount; currency; authCode; cardPan; transactionStatus; reasonCode
-//
-// Но: если в твоём callback другие поля — я подправлю 1 раз,
-// просто пришли пример payload из webhook (без карты/персональных).
-//
+// 3) Verify WFP signature
 $secret = envv('WFP_SECRET');
 if (!$secret) { http_response_code(500); ok_json(['error'=>'WFP secret missing']); }
 $merchantAccount = $data['merchantAccount'] ?? envv('WFP_MERCHANT', '');
@@ -186,7 +153,6 @@ $signStr = implode(';', [
 
 $calc = hash_hmac('md5', $signStr, $secret);
 
-// ✅ DEV bypass (временно) — чтобы тестировать путь до Meta без реальной подписи
 $dev = envv('DEV_BYPASS_WFP_SIGNATURE', '0');
 
 if ($dev !== '1') {
@@ -195,53 +161,56 @@ if ($dev !== '1') {
     ok_json(['error' => 'bad signature']);
   }
 } else {
-  // полезно логировать, что ты реально в bypass
-  file_put_contents(__DIR__.'/parse_check.log', date('c')." DEV_BYPASS_WFP_SIGNATURE=1\n", FILE_APPEND);
+  _log("DEV_BYPASS_WFP_SIGNATURE=1");
 }
 
-// 4) проверяем статус успеха
+// 4) Check for successful transaction
 $success = in_array(strtoupper($status), ['APPROVED', 'SUCCESS', 'ACCEPTED'], true);
 if (!$success) {
-  // можно логировать как failed payment
+  _log("IGNORED non-success status={$status} order={$order_id}");
   ok_json(['ok' => true, 'ignored' => 'not success', 'status' => $status]);
 }
 
-// 5) Дедуп: если уже отправляли Purchase по этому order_id — выходим OK
+// 5) C1 FIX: State-machine deduplication (no more DEL)
+// States: "processing" -> "done" or "failed"
 $dedupeKey = "wfp:purchase_sent:$order_id";
-$setnx = upstash_cmd(["SET", $dedupeKey, "1", "NX", "EX", 60*60*24*90]); // 90 дней
+$setnx = upstash_cmd(["SET", $dedupeKey, "processing", "NX", "EX", 900]); // 15 min lock
 
 if ($setnx !== "OK") {
-  file_put_contents(
-    __DIR__ . '/wfp_dedup.log',
-    date('c') . " DEDUP order={$order_id}\n",
-    FILE_APPEND
-  );
-  ok_json(['ok' => true, 'deduped' => true]);
+  // Key already exists — check its state
+  $currentState = upstash_cmd(["GET", $dedupeKey]);
+  _log("DEDUP order={$order_id} state={$currentState}");
+
+  if ($currentState === 'done' || $currentState === 'processing') {
+    ok_json(['ok' => true, 'deduped' => true, 'state' => $currentState]);
+  }
+  // state=failed or unknown -> allow reprocessing by overwriting
+  $overwrite = upstash_cmd(["SET", $dedupeKey, "processing", "EX", 900]);
+  if ($overwrite !== "OK") {
+    ok_json(['ok' => true, 'deduped' => true, 'state' => 'contention']);
+  }
+  _log("REPROCESS after state={$currentState} order={$order_id}");
 }
 
-// 6) Достаём token по order_id
+// 6) Get token by order_id
 $mapKey = "wfp:order:$order_id";
 $mapJson = upstash_cmd(["GET", $mapKey]);
 $map = $mapJson ? json_decode($mapJson, true) : null;
 $token = is_array($map) ? ($map['token'] ?? '') : '';
 
 if ($token === '') {
-  // если маппинга нет — всё равно можно отправить Purchase только по order_id,
-  // но атрибуция будет хуже
   $token = 'missing';
 }
 
-// 7) (опционально) достаём lead data по token: ph_sha256 / fbp / fbc / ua / ip
+// 7) Fetch lead data by token
 $lead = null;
+$leadJson = '';
 if ($token !== 'missing') {
   $leadJson = upstash_cmd(["GET", "lead:$token"]);
   $lead = $leadJson ? json_decode($leadJson, true) : null;
 }
 
-// после: $lead = $leadJson ? json_decode($leadJson, true) : null;
-
 function unwrap_lead($lead) {
-  // если lead — это строка JSON
   if (is_string($lead)) {
     $x = json_decode($lead, true);
     return is_array($x) ? unwrap_lead($x) : null;
@@ -249,7 +218,6 @@ function unwrap_lead($lead) {
 
   if (!is_array($lead)) return null;
 
-  // классический мусор: ["0" => "....json...."]
   if (isset($lead['0']) && is_string($lead['0'])) {
     $x = json_decode($lead['0'], true);
     if (is_array($x)) return unwrap_lead($x);
@@ -260,55 +228,30 @@ function unwrap_lead($lead) {
 
 $lead = unwrap_lead($lead);
 
-@file_put_contents(__DIR__ . '/meta_graph.log',
-  date('c')
-  . " DEBUG leadJson_len=" . strlen((string)$leadJson)
-  . " lead_is_array=" . (is_array($lead) ? '1' : '0')
-  . " ph=" . (is_array($lead) ? ($lead['ph_sha256'] ?? '') : '')
-  . "\n",
-  FILE_APPEND
+_log("LEAD order={$order_id} token={$token}"
+  . " lead_ok=" . (is_array($lead) ? '1' : '0')
+  . " ph=" . (is_array($lead) ? substr($lead['ph_sha256'] ?? '', 0, 8) : '-')
 );
 
-// 7.1) Если нет phone hash — НЕ отправляем Purchase (качество будет мусор)
-// Логируем пропуск, но webhook отвечаем быстро (ok:true), чтобы WFP не ретраил бесконечно.
+// 7.1) M3 FIX: phone hash is OPTIONAL — send Purchase with whatever user_data exists
+// ph_sha256 is kept if present, but its absence no longer blocks the event
 $ph = (is_array($lead) ? ($lead['ph_sha256'] ?? '') : '');
 $ph = is_string($ph) ? strtolower(trim($ph)) : '';
 $is_ph_valid = (bool)preg_match('~^[0-9a-f]{64}$~', $ph);
-
-@file_put_contents(__DIR__ . '/meta_graph.log', date('c') . " WEBHOOK_HIT order={$order_id} token={$token}\n", FILE_APPEND);
+$ph_sha = $is_ph_valid ? $ph : '';
 
 if (!$is_ph_valid) {
-  // Лог пропуска
-  file_put_contents(
-    __DIR__ . '/wfp_skip.log',
-    date('c') . " SKIP_NO_PHONE order={$order_id} token={$token} has_lead=" . (is_array($lead) ? '1' : '0') .
-    " fbp=" . (is_array($lead) ? ($lead['fbp'] ?? '') : '') .
-    " fbc=" . (is_array($lead) ? ($lead['fbc'] ?? '') : '') .
-    " page=" . (is_array($lead) ? ($lead['page_url'] ?? '') : '') .
-    "\n",
-    FILE_APPEND
-  );
-
-  // ВАЖНО: дедуп-ключ уже мог быть поставлен выше.
-  // Чтобы не “навсегда похоронить” заказ без телефона — удалим дедуп,
-  // чтобы WFP retry (или ручной повтор) мог отправить позже, когда phone появится.
-  upstash_cmd(["DEL", $dedupeKey]);
-
-  ok_json(['ok' => true, 'skipped' => 'no_phone_hash']);
+  _log("WARN no_phone order={$order_id} token={$token} — sending with external_id/fbp/fbc only");
 }
 
-// 8) Отправляем Purchase напрямую в Meta Graph API (без self-call на /meta_purchase.php)
-function log_meta_graph($msg) {
-  @file_put_contents(__DIR__ . '/meta_graph.log', date('c') . " " . $msg . "\n", FILE_APPEND);
-}
-
+// 8) Send Purchase to Meta Graph API
 $ACCESS_TOKEN    = envv('META_CAPI_TOKEN');
 $PIXEL_ID        = envv('META_PIXEL_ID');
-$TEST_EVENT_CODE = envv('META_TEST_EVENT_CODE'); // если задан — будет тестовый ивент
+$TEST_EVENT_CODE = envv('META_TEST_EVENT_CODE');
 $API_VERSION     = envv('META_API_VERSION', 'v21.0');
 
 if (!$ACCESS_TOKEN || !$PIXEL_ID) {
-  upstash_cmd(["DEL", $dedupeKey]);
+  upstash_cmd(["SET", $dedupeKey, "failed", "EX", 300]);
   http_response_code(500);
   ok_json([
     'error' => 'meta env missing',
@@ -317,12 +260,9 @@ if (!$ACCESS_TOKEN || !$PIXEL_ID) {
   ]);
 }
 
-// user_data: минимум external_id (sha256) + по возможности fbp/fbc + ip/ua
 $external_id_sha = ($token && $token !== 'missing')
   ? hash('sha256', $token)
   : hash('sha256', $order_id);
-
-$ph_sha = $ph; // уже провалидирован выше
 
 function norm_name($s){
   $s = trim((string)$s);
@@ -343,13 +283,10 @@ if ($name_raw !== '') {
   if (count($parts) > 1) $ln = end($parts);
 }
 
-log_meta_graph("NAME fn=" . ($fn? '1':'0') . " ln=" . ($ln? '1':'0') . " raw=" . substr($name_raw,0,40));
-
 $user_data = array_filter([
   'ph' => ($ph_sha !== '' ? [ $ph_sha ] : null),
   'external_id' => [ $external_id_sha ],
 
-  // имя (если хочешь)
   'fn' => ($fn !== '' ? [ hash('sha256', $fn) ] : null),
   'ln' => ($ln !== '' ? [ hash('sha256', $ln) ] : null),
 
@@ -364,20 +301,17 @@ $user_data = array_filter([
   return true;
 });
 
-// ✅ ВОТ СЮДА ВСТАВИТЬ (сразу после сборки user_data)
-log_meta_graph("UD flags ph=".(isset($user_data['ph'])?'1':'0').
-  " em=".(isset($user_data['em'])?'1':'0').
-  " fbp=".(!empty($user_data['fbp'])?'1':'0').
-  " fbc=".(!empty($user_data['fbc'])?'1':'0').
-  " fn=".(isset($user_data['fn'])?'1':'0').
-  " ln=".(isset($user_data['ln'])?'1':'0').
-  " ext=".(isset($user_data['external_id'])?'1':'0')
+_log("UD ph=".(isset($user_data['ph'])?'1':'0')
+  ." fbp=".(!empty($user_data['fbp'])?'1':'0')
+  ." fbc=".(!empty($user_data['fbc'])?'1':'0')
+  ." fn=".(isset($user_data['fn'])?'1':'0')
+  ." ext=".(isset($user_data['external_id'])?'1':'0')
 );
 
 $event = array_filter([
   'event_name' => 'Purchase',
   'event_time' => time(),
-  'event_id'   => $order_id, // дедуп на стороне Meta
+  'event_id'   => $order_id,
   'action_source' => 'website',
   'event_source_url' => (is_array($lead) ? ($lead['page_url'] ?? null) : null) ?? envv('DEFAULT_EVENT_SOURCE_URL', ''),
   'user_data' => $user_data,
@@ -399,16 +333,11 @@ if (!empty($TEST_EVENT_CODE)) $bodyArr['test_event_code'] = $TEST_EVENT_CODE;
 $metaUrl = "https://graph.facebook.com/{$API_VERSION}/{$PIXEL_ID}/events";
 $metaPayload = json_encode($bodyArr, JSON_UNESCAPED_UNICODE);
 
-log_meta_graph("SEND event_id=" . ($event['event_id'] ?? 'NULL') .
-  " event_name=" . ($event['event_name'] ?? 'NULL') .
-  " test=" . (!empty($TEST_EVENT_CODE) ? '1' : '0') .
-  " url={$metaUrl}");
+_log("SEND event_id={$order_id} url={$metaUrl}");
 
 $did_retry = 0;
 $t0 = microtime(true);
 
-// Helper: execute Meta CAPI request with Bearer auth
-// Returns [$res, $err, $errno, $code]
 $_meta_do_request = function(string $reqUrl, array $headers, string $payload) {
   $ch = curl_init($reqUrl);
   curl_setopt_array($ch, [
@@ -435,9 +364,8 @@ $metaHeaders = [
 list($res, $err, $errno, $code) = $_meta_do_request($metaUrl, $metaHeaders, $metaPayload);
 
 // TODO(remove after 2025-08-01): Fallback to query-string token if Bearer returns 401/403
-// Enable via META_TOKEN_QUERY_FALLBACK=1 in env during migration period
 if (in_array($code, [401, 403], true) && envv('META_TOKEN_QUERY_FALLBACK') === '1') {
-  log_meta_graph("FALLBACK query-string token after http={$code}");
+  _log("FALLBACK query-string token after http={$code}");
   $fallbackUrl = $metaUrl . '?access_token=' . urlencode($ACCESS_TOKEN);
   $fallbackHeaders = ['Content-Type: application/json'];
   list($res, $err, $errno, $code) = $_meta_do_request($fallbackUrl, $fallbackHeaders, $metaPayload);
@@ -448,24 +376,29 @@ if (in_array($code, [401, 403], true) && envv('META_TOKEN_QUERY_FALLBACK') === '
 $timed_out = ($errno === 28) || (($code === 0) && $err && stripos($err, 'timed out') !== false);
 if ($timed_out) {
   $did_retry = 1;
-  log_meta_graph("RETRY after timeout errno={$errno} ...");
+  _log("RETRY timeout errno={$errno}");
   usleep(200000);
   list($res, $err, $errno, $code) = $_meta_do_request($metaUrl, $metaHeaders, $metaPayload);
 }
 
 $tt = microtime(true) - $t0;
 
-log_meta_graph("RESP http={$code} errno={$errno} err=" . ($err ?: '-') .
-  " t=" . sprintf('%.3f', $tt) .
-  " retry={$did_retry} body=" . substr((string)$res, 0, 800)
+_log("RESP http={$code} errno={$errno} err=" . ($err ?: '-')
+  . " t=" . sprintf('%.3f', $tt)
+  . " retry={$did_retry}"
 );
 
-// если Meta не принял — удаляем dedupeKey, чтобы WFP мог повторить вебхук
+// C1 FIX: on Meta failure, set state to "failed" with short TTL (never DEL)
 if ($err || $code < 200 || $code >= 300) {
-  upstash_cmd(["DEL", $dedupeKey]);
+  upstash_cmd(["SET", $dedupeKey, "failed", "EX", 300]); // 5 min, allows WFP retry
+  _log("DEDUP->failed order={$order_id}");
   http_response_code(502);
-  ok_json(['error' => 'meta failed', 'http' => $code, 'errno' => $errno, 'err' => $err, 'body' => substr((string)$res, 0, 800)]);
+  ok_json(['error' => 'meta failed', 'http' => $code, 'errno' => $errno]);
 }
+
+// Success: mark dedup as done with long TTL
+upstash_cmd(["SET", $dedupeKey, "done", "EX", 60*60*24*90]); // 90 days
+_log("DEDUP->done order={$order_id}");
 
 function wfp_accept_response(string $order_id, string $secret) {
   $time = time();
