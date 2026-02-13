@@ -1,6 +1,13 @@
-FROM php:8.2-cli
+FROM php:8.2-fpm-alpine
 
-WORKDIR /app
+RUN apk add --no-cache nginx && \
+      echo "daemon off;" >> /etc/nginx/nginx.conf
+
+COPY nginx.conf /etc/nginx/http.d/default.conf
 COPY . /app
 
-CMD ["sh","-lc","php -S 0.0.0.0:${PORT:-8080} -t ."]
+# Block direct access to log/txt/old files in nginx.conf:
+# location ~* \.(log|txt|md)$ { deny all; }
+# location /old/ { deny all; }
+
+CMD ["sh", "-c", "php-fpm -D && nginx"]

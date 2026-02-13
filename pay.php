@@ -143,11 +143,11 @@ $signature_string = implode(';', [
   $data['merchantDomainName'],
   $data['orderReference'],
   $data['orderDate'],
-  $data['amount'],          // "1.00"
+  $data['amount'],             // "290.00"
   $data['currency'],
   implode(';', $productName),
   implode(';', $productCount),
-  implode(';', $productPrice), // "1.00"
+  implode(';', $productPrice), // "290.00"
 ]);
 
 file_put_contents(__DIR__.'/sign.txt', $signature_string . PHP_EOL, FILE_APPEND);
