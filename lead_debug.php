@@ -1,4 +1,13 @@
 <?php
+// Protected debug endpoint — requires DEBUG_SECRET env + ?key= query param
+$_debug_secret = getenv('DEBUG_SECRET') ?: '';
+if ($_debug_secret === '' || ($_GET['key'] ?? '') !== $_debug_secret) {
+  http_response_code(403);
+  header('Content-Type: application/json');
+  echo json_encode(['error' => 'forbidden']);
+  exit;
+}
+
 header("Content-Type: application/json; charset=utf-8");
 header("Access-Control-Allow-Origin: *");
 

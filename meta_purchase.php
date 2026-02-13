@@ -15,19 +15,39 @@
  * }
  */
 
-file_put_contents(__DIR__ . '/BOOT.txt', date('c') . " HIT\n", FILE_APPEND);
+error_log("meta_purchase.php HIT method=" . ($_SERVER['REQUEST_METHOD'] ?? ''));
 
 header('Content-Type: application/json; charset=utf-8');
 
-// --- CORS ---
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
-header("Access-Control-Allow-Origin: $origin");
-header("Vary: Origin");
+// --- CORS (whitelist origins) ---
+$_allowed_origins = getenv('ALLOWED_ORIGINS') ?: '';
+$_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+if ($_allowed_origins !== '') {
+  $_origin_list = array_map('trim', explode(',', $_allowed_origins));
+  if (in_array($_origin, $_origin_list, true)) {
+    header("Access-Control-Allow-Origin: $_origin");
+    header("Vary: Origin");
+  }
+} else {
+  // Fallback: allow all if ALLOWED_ORIGINS not configured (backwards compat)
+  header("Access-Control-Allow-Origin: *");
+}
 header("Access-Control-Allow-Methods: POST, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type");
+header("Access-Control-Allow-Headers: Content-Type, Authorization");
 header("Access-Control-Max-Age: 86400");
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { http_response_code(204); exit; }
 // --- /CORS ---
+
+// M4 FIX: require Bearer token authentication
+$_meta_purchase_secret = getenv('META_PURCHASE_SECRET') ?: '';
+if ($_meta_purchase_secret !== '') {
+  $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+  if ($authHeader !== 'Bearer ' . $_meta_purchase_secret) {
+    http_response_code(403);
+    echo json_encode(['error' => 'unauthorized'], JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+}
 
 function j(int $code, array $arr): void {
   http_response_code($code);

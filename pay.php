@@ -160,33 +160,11 @@ $signature_string = implode(';', [
   implode(';', $productPrice), // "1.00"
 ]);
 
-file_put_contents(__DIR__.'/sign.txt', $signature_string . PHP_EOL, FILE_APPEND);
-
+// C3/C4 FIX: removed sign.txt/debug_amount.txt file writes and ?dbg block
+// Signature info is logged to stderr only for debugging
 $data['merchantSignature'] = hash_hmac('md5', $signature_string, $merchantSecretKey);
 
-// ===== DEBUG WFP SIGNATURE =====
-if (isset($_GET['dbg'])) {
-  header('Content-Type: text/plain; charset=utf-8');
-  echo "returnUrl=" . $data['returnUrl'] . "\n";
-  echo "serviceUrl=" . $data['serviceUrl'] . "\n";
-  echo "orderReference=" . $data['orderReference'] . "\n";
-  echo "signature_string=" . $signature_string . "\n";
-  echo "sig=" . $data['merchantSignature'] . "\n";
-  exit;
-}
-
-file_put_contents(__DIR__.'/debug_amount.txt',
-  "merchantAccount=".$data['merchantAccount']."\n".
-  "merchantDomainName=".$data['merchantDomainName']."\n".
-  "orderReference=".$data['orderReference']."\n".
-  "orderDate=".$data['orderDate']."\n".
-  "currency=".$data['currency']."\n".
-  "amount=".$data['amount']."\n".
-  "productPrice0=".$productPrice[0]."\n".
-  "signature_string=".$signature_string."\n".
-  "signature=".$data['merchantSignature']."\n\n",
-  FILE_APPEND
-);
+error_log("pay.php order={$order_id} token={$token} amount={$amount_str} currency={$currency}");
 
 // 3) отправляем на WFP
 $wfpDomain = 'https://secure.wayforpay.com/pay';
