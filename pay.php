@@ -86,7 +86,7 @@ if ($token === '' || strlen($token) > 120 || strpos($token, '{') !== false || st
   exit('Token missing/bad');
 }
 
-$amount_raw = envv('PRICE_UAH', '290');
+$amount_raw = envv('PRICE_UAH', '1');
 $amount     = (float)$amount_raw;
 
 if ($amount < 1 || $amount > 100000) {
