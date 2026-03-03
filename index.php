@@ -1,5 +1,5 @@
 <?php
-// index.php (collect.php) — принимает GET (image beacon) и сохраняет lead в Upstash
+// index.php - collect.php — принимает GET (image beacon) и сохраняет lead в Upstash
 header("Access-Control-Allow-Origin: *");
 
 // --- CORS + preflight (по желанию, но нормально) ---
